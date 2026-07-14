@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.claude/
+
+# env files (*.local covers .env.local etc.)
+*.local
+.env
+
+# macOS
+.DS_Store
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# test coverage
+coverage/
