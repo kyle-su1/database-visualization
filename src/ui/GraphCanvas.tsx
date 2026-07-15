@@ -9,7 +9,8 @@ import {
   type Simulation,
   type SimulationNodeDatum,
 } from 'd3-force';
-import type { GraphEdge, GraphNode, PillNode } from '../graph/session';
+import type { GraphNode, PillNode } from '../graph/session';
+import type { ViewEdge } from '../graph/view';
 
 const W = 1200;
 const H = 800;
@@ -27,7 +28,7 @@ interface SimLink {
 interface Props {
   nodes: GraphNode[];
   pills: PillNode[];
-  edges: GraphEdge[];
+  edges: ViewEdge[];
   selectedId: string | null;
   isExpanded: (node: GraphNode) => boolean;
   colorFor: (table: string) => string;
@@ -48,6 +49,11 @@ export function GraphCanvas({
   onPillClick,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const viewportRef = useRef<SVGGElement>(null);
+  const viewRef = useRef({ x: 0, y: 0, k: 1 });
+  const panRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(
+    null,
+  );
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
   const simNodesRef = useRef(new Map<string, SimNode>());
   const simLinksRef = useRef<SimLink[]>([]);
@@ -145,10 +151,69 @@ export function GraphCanvas({
     [],
   );
 
+  // ------------------------------------------------------------- pan + zoom
+
+  const applyView = () => {
+    const v = viewRef.current;
+    viewportRef.current?.setAttribute('transform', `translate(${v.x},${v.y}) scale(${v.k})`);
+  };
+
+  /** Client coords -> untransformed viewBox coords (for panning/zooming math). */
+  const toViewBoxPoint = (clientX: number, clientY: number) => {
+    const ctm = svgRef.current!.getScreenCTM();
+    const p = new DOMPoint(clientX, clientY).matrixTransform(ctm!.inverse());
+    return { x: p.x, y: p.y };
+  };
+
+  const startPan = (e: React.PointerEvent<SVGSVGElement>) => {
+    // Node/pill drags run first (bubbling) and set dragRef — skip those.
+    if (dragRef.current || e.button !== 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = toViewBoxPoint(e.clientX, e.clientY);
+    const v = viewRef.current;
+    panRef.current = { startX: p.x, startY: p.y, origX: v.x, origY: v.y };
+    svgRef.current!.style.cursor = 'grabbing';
+  };
+
+  const movePan = (e: React.PointerEvent<SVGSVGElement>) => {
+    const pan = panRef.current;
+    if (!pan) return;
+    const p = toViewBoxPoint(e.clientX, e.clientY);
+    viewRef.current.x = pan.origX + (p.x - pan.startX);
+    viewRef.current.y = pan.origY + (p.y - pan.startY);
+    applyView();
+  };
+
+  const endPan = () => {
+    panRef.current = null;
+    if (svgRef.current) svgRef.current.style.cursor = '';
+  };
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    // Native listener: React's onWheel is passive, so preventDefault (to stop
+    // page scroll) requires attaching with { passive: false }.
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const v = viewRef.current;
+      const k = Math.min(4, Math.max(0.2, v.k * Math.exp(-e.deltaY * 0.002)));
+      const p = toViewBoxPoint(e.clientX, e.clientY);
+      // Keep the graph point under the cursor fixed while scaling.
+      v.x = p.x - ((p.x - v.x) * k) / v.k;
+      v.y = p.y - ((p.y - v.y) * k) / v.k;
+      v.k = k;
+      applyView();
+    };
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, []);
+
   // ------------------------------------------------------------ drag + click
 
+  /** Client coords -> simulation coords (inside the pan/zoom viewport). */
   const toSvgPoint = (e: React.PointerEvent) => {
-    const ctm = svgRef.current!.getScreenCTM();
+    const ctm = viewportRef.current!.getScreenCTM();
     const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm!.inverse());
     return { x: p.x, y: p.y };
   };
@@ -196,7 +261,15 @@ export function GraphCanvas({
   };
 
   return (
-    <svg ref={svgRef} className="graph-canvas" viewBox={`0 0 ${W} ${H}`}>
+    <svg
+      ref={svgRef}
+      className="graph-canvas"
+      viewBox={`0 0 ${W} ${H}`}
+      onPointerDown={startPan}
+      onPointerMove={movePan}
+      onPointerUp={endPan}
+      onPointerCancel={endPan}
+    >
       <defs>
         <marker
           id="arrow"
@@ -210,6 +283,7 @@ export function GraphCanvas({
           <path d="M0,0 L12,6 L0,12 z" fill="#94a3b8" />
         </marker>
       </defs>
+      <g ref={viewportRef}>
       <g>
         {edges.map((e) => (
           <line
@@ -218,8 +292,8 @@ export function GraphCanvas({
               if (el) edgeElsRef.current.set(e.id, el);
               else edgeElsRef.current.delete(e.id);
             }}
-            className="edge"
-            markerEnd="url(#arrow)"
+            className={'edge' + (e.dissolved ? ' dissolved' : '')}
+            markerEnd={e.dissolved ? undefined : 'url(#arrow)'}
           >
             <title>{e.label}</title>
           </line>
@@ -272,6 +346,7 @@ export function GraphCanvas({
             </g>
           );
         })}
+      </g>
       </g>
     </svg>
   );

@@ -35,6 +35,25 @@ header h1 {
   color: #64748b;
 }
 
+.header-button {
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.header-button:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.header-button:disabled {
+  color: #94a3b8;
+  cursor: default;
+}
+
 main {
   position: relative;
   flex: 1;
@@ -45,6 +64,8 @@ main {
   width: 100%;
   height: 100%;
   display: block;
+  cursor: grab;
+  touch-action: none;
 }
 
 .edge {
@@ -77,6 +98,83 @@ main {
 .node.selected circle {
   stroke: #0f172a;
   stroke-width: 3;
+}
+
+.edge.dissolved {
+  stroke-dasharray: 5 4;
+  stroke: #a78bfa;
+}
+
+.dissolve-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #334155;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dissolve-names {
+  color: #94a3b8;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.junction-badge {
+  margin-left: auto;
+  border: 1px solid transparent;
+  background: none;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 1px 4px;
+  cursor: pointer;
+  color: #cbd5e1;
+}
+
+.junction-badge.on {
+  color: #7c3aed;
+  border-color: #ddd6fe;
+  background: #f5f3ff;
+}
+
+.query-log {
+  bottom: 12px;
+  right: 12px;
+  width: 520px;
+  max-height: 45%;
+  display: flex;
+  flex-direction: column;
+}
+
+.query-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.query-entry {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #f1f5f9;
+  padding-top: 4px;
+}
+
+.query-entry code {
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.query-meta {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.footer-link {
+  margin-left: 0;
 }
 
 .node,

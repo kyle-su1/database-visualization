@@ -175,6 +175,10 @@ export class SqlJsDataSource implements DataSource {
     return [...this.log];
   }
 
+  dispose(): void {
+    this.db.close();
+  }
+
   // --------------------------------------------------------------- helpers
 
   private assertTable(name: string): TableSchema {

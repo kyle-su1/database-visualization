@@ -88,4 +88,7 @@ export interface DataSource {
 
   /** Every SQL statement executed so far (for the query-log panel). */
   getQueryLog(): QueryLogEntry[];
+
+  /** Release underlying resources (e.g. wasm memory) when replaced. */
+  dispose?(): void;
 }

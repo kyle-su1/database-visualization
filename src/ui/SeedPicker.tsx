@@ -17,21 +17,24 @@ export function SeedPicker({ schema, colorFor, search, onPick, onClear, hasGraph
     () => (schema.tables.find((t) => t.rowCount > 0) ?? schema.tables[0]).name,
   );
   const [text, setText] = useState('');
-  const [rows, setRows] = useState<Row[]>([]);
+  // Rows are stored WITH the table they were fetched from, so a stale result
+  // is never rendered against a newly selected table's schema.
+  const [result, setResult] = useState<{ table: string; rows: Row[] }>({ table, rows: [] });
 
   useEffect(() => {
     let cancelled = false;
     search(table, text)
-      .then((r) => {
-        if (!cancelled) setRows(r);
+      .then((rows) => {
+        if (!cancelled) setResult({ table, rows });
       })
-      .catch(() => {});
+      .catch((e: unknown) => console.error('seed search failed:', e));
     return () => {
       cancelled = true;
     };
   }, [table, text, search]);
 
   const t = tableByName(schema, table);
+  const rows = result.table === table ? result.rows : [];
 
   return (
     <div className="panel seed-picker">

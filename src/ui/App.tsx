@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DataSource, DatabaseSchema, Row } from '../datasource/types';
 import { createSqlJsDataSource } from '../datasource/sqljs';
 import { tableColor } from '../schema/display';
 import { relationshipsFor, tableByName, type Relationship } from '../schema/relationships';
+import { detectJunctionTables, effectiveJunctions } from '../schema/junctions';
 import {
   addSeed,
+  completeJunctionNodes,
   countRelationship,
   emptyGraph,
+  expandAllNodes,
   expandMore,
   expandNode,
   expandRelationship,
@@ -19,10 +22,12 @@ import {
   type GraphState,
   type PillNode,
 } from '../graph/session';
+import { deriveView } from '../graph/view';
 import { GraphCanvas } from './GraphCanvas';
 import { Legend } from './Legend';
 import { SeedPicker } from './SeedPicker';
 import { Inspector, type RelEntry } from './Inspector';
+import { QueryLog } from './QueryLog';
 
 const FIXTURE = 'Chinook.sqlite';
 
@@ -32,9 +37,50 @@ export function App() {
   const [graph, setGraph] = useState<GraphState>(emptyGraph());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [dissolve, setDissolve] = useState(true);
+  const [junctionOverrides, setJunctionOverrides] = useState<Map<string, boolean>>(new Map());
+  const [showLog, setShowLog] = useState(false);
   const [status, setStatus] = useState('Loading database…');
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const expanding = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const detected = useMemo(
+    () => (schema ? detectJunctionTables(schema) : new Set<string>()),
+    [schema],
+  );
+  const junctions = useMemo(
+    () => effectiveJunctions(detected, junctionOverrides),
+    [detected, junctionOverrides],
+  );
+  const expandOpts = useMemo(
+    () => (dissolve ? { junctions } : {}),
+    [dissolve, junctions],
+  );
+
+  const loadDatabase = useCallback(
+    async (bytes: Uint8Array, name: string) => {
+      const source = await createSqlJsDataSource(bytes, name);
+      const dbSchema = await source.getSchema();
+      const seedTable = dbSchema.tables.find((t) => t.rowCount > 0);
+      if (!seedTable) {
+        source.dispose?.();
+        throw new Error(`${name} contains no rows`);
+      }
+      const [seedRow] = await source.getRows(seedTable.name, { limit: 1 });
+      ds?.dispose?.();
+      setDs(source);
+      setSchema(dbSchema);
+      setGraph(addSeed(emptyGraph(), seedTable, seedRow));
+      setSelectedId(null);
+      setJunctionOverrides(new Map());
+      setStatus(
+        `${name} — ${dbSchema.tables.length} tables. Seeded ${seedTable.name}; click a node to inspect, double-click to expand.`,
+      );
+    },
+    [ds],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -42,28 +88,25 @@ export function App() {
       const res = await fetch(import.meta.env.BASE_URL + FIXTURE);
       if (!res.ok) throw new Error(`Failed to fetch ${FIXTURE}: ${res.status}`);
       const buf = new Uint8Array(await res.arrayBuffer());
-      const source = await createSqlJsDataSource(buf, FIXTURE);
-      const dbSchema = await source.getSchema();
-
-      // Default seed: first row of the first non-empty table.
-      const seedTable = dbSchema.tables.find((t) => t.rowCount > 0);
-      if (!seedTable) throw new Error('Database contains no rows');
-      const [seedRow] = await source.getRows(seedTable.name, { limit: 1 });
-
-      if (cancelled) return;
-      setDs(source);
-      setSchema(dbSchema);
-      setGraph(addSeed(emptyGraph(), seedTable, seedRow));
-      setStatus(
-        `${FIXTURE} — ${dbSchema.tables.length} tables. Seeded ${seedTable.name}; click a node to inspect, double-click to expand.`,
-      );
+      if (!cancelled) await loadDatabase(buf, FIXTURE);
     })().catch((e: unknown) => {
       if (!cancelled) setError(e instanceof Error ? e.message : String(e));
     });
     return () => {
       cancelled = true;
     };
+    // Initial fixture load only; later loads go through handleOpenFile.
   }, []);
+
+  const handleOpenFile = async (file: File) => {
+    try {
+      setStatus(`Loading ${file.name}…`);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await loadDatabase(bytes, file.name);
+    } catch (e: unknown) {
+      setStatus(`Failed to load ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   const selectedNode = selectedId ? (graph.nodes.get(selectedId) ?? null) : null;
 
@@ -87,6 +130,7 @@ export function App() {
   const runExpansion = async (fn: () => Promise<ExpandResult>, what: string) => {
     if (expanding.current) return;
     expanding.current = true;
+    setBusy(true);
     setStatus(`Expanding ${what}…`);
     try {
       const result = await fn();
@@ -98,20 +142,23 @@ export function App() {
       setStatus(e instanceof Error ? e.message : String(e));
     } finally {
       expanding.current = false;
+      setBusy(false);
     }
   };
 
   const handleExpandAll = (node: GraphNode) => {
     if (!ds || !schema) return;
-    void runExpansion(() => expandNode(ds, schema, graph, node), `${node.table}: ${node.label}`);
+    void runExpansion(
+      () => expandNode(ds, schema, graph, node, expandOpts),
+      `${node.table}: ${node.label}`,
+    );
   };
 
   const handleExpandRel = (rel: Relationship) => {
     if (!ds || !schema || !selectedNode) return;
-    const desc =
-      rel.kind === 'forward' ? `→ ${rel.parentTable}` : `← ${rel.childTable}`;
+    const desc = rel.kind === 'forward' ? `→ ${rel.parentTable}` : `← ${rel.childTable}`;
     void runExpansion(
-      () => expandRelationship(ds, schema, graph, selectedNode, rel),
+      () => expandRelationship(ds, schema, graph, selectedNode, rel, expandOpts),
       `${selectedNode.label} ${desc}`,
     );
   };
@@ -119,6 +166,25 @@ export function App() {
   const handlePillClick = (pill: PillNode) => {
     if (!ds || !schema) return;
     void runExpansion(() => expandMore(ds, schema, graph, pill), `more ${pill.childTable}`);
+  };
+
+  const handleToggleDissolve = (on: boolean) => {
+    setDissolve(on);
+    if (on && ds && schema && [...graph.nodes.values()].some((n) => junctions.has(n.table))) {
+      // Fetch missing partners so existing junction rows can dissolve too.
+      void runExpansion(
+        () => completeJunctionNodes(ds, schema, graph, junctions),
+        'junction partners',
+      );
+    }
+  };
+
+  const handleToggleJunction = (table: string) => {
+    setJunctionOverrides((prev) => {
+      const next = new Map(prev);
+      next.set(table, !junctions.has(table));
+      return next;
+    });
   };
 
   const searchRows = useCallback(
@@ -142,11 +208,23 @@ export function App() {
     setStatus('Graph cleared — pick a seed row.');
   };
 
-  const nodes = [...graph.nodes.values()];
-  const edges = [...graph.edges.values()];
-  const pills = [...graph.pills.values()];
-  const tablesInGraph = [...new Set(nodes.map((n) => n.table))];
+  const view = useMemo(
+    () => deriveView(graph, dissolve ? junctions : new Set<string>()),
+    [graph, dissolve, junctions],
+  );
+  const stateTables = [...new Set([...graph.nodes.values()].map((n) => n.table))];
   const colorFor = (table: string) => (schema ? tableColor(schema, table) : '#999');
+  const unexpandedCount = schema
+    ? [...graph.nodes.values()].filter((n) => !isFullyExpanded(schema, graph, n)).length
+    : 0;
+
+  const handleExpandAllNodes = () => {
+    if (!ds || !schema) return;
+    void runExpansion(
+      () => expandAllNodes(ds, schema, graph, expandOpts),
+      `${unexpandedCount} unexpanded nodes (1 hop)`,
+    );
+  };
 
   const relEntries: RelEntry[] =
     schema && selectedNode
@@ -167,16 +245,59 @@ export function App() {
   }
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        const file = e.dataTransfer.files[0];
+        if (file) void handleOpenFile(file);
+      }}
+    >
       <header>
         <h1>Relational Data Graph Explorer</h1>
+        <button
+          className="header-button"
+          onClick={() => fileInputRef.current?.click()}
+          title="Open any SQLite file (or drag & drop one anywhere)"
+        >
+          Open .sqlite…
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".sqlite,.sqlite3,.db"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleOpenFile(file);
+            e.target.value = '';
+          }}
+        />
+        <button
+          className="header-button"
+          disabled={busy || unexpandedCount === 0}
+          onClick={handleExpandAllNodes}
+          title="Expand every unexpanded node by one hop"
+        >
+          {busy ? 'Expanding…' : `Expand all nodes (${unexpandedCount})`}
+        </button>
+        <label className="dissolve-toggle" title="Collapse junction-table rows into direct edges">
+          <input
+            type="checkbox"
+            checked={dissolve}
+            onChange={(e) => handleToggleDissolve(e.target.checked)}
+          />
+          dissolve junctions
+          {junctions.size > 0 && <span className="dissolve-names">({[...junctions].join(', ')})</span>}
+        </label>
         <span className="status">{status}</span>
       </header>
       <main>
         <GraphCanvas
-          nodes={nodes}
-          pills={pills}
-          edges={edges}
+          nodes={view.nodes}
+          pills={view.pills}
+          edges={view.edges}
           selectedId={selectedId}
           isExpanded={(n) => (schema ? isFullyExpanded(schema, graph, n) : false)}
           colorFor={colorFor}
@@ -191,7 +312,7 @@ export function App() {
             search={searchRows}
             onPick={handlePickSeed}
             onClear={handleClear}
-            hasGraph={nodes.length > 0}
+            hasGraph={graph.nodes.size > 0}
           />
         )}
         {selectedNode && (
@@ -204,11 +325,24 @@ export function App() {
             onClose={() => setSelectedId(null)}
           />
         )}
-        <Legend tables={tablesInGraph} colorFor={colorFor} />
+        <Legend
+          tables={stateTables}
+          colorFor={colorFor}
+          junctions={junctions}
+          onToggleJunction={handleToggleJunction}
+        />
+        {showLog && ds && <QueryLog entries={ds.getQueryLog()} onClose={() => setShowLog(false)} />}
       </main>
       <footer>
-        {nodes.length} nodes · {edges.length} edges · click a node to inspect ·
-        double-click to expand all its relationships
+        {view.nodes.length} nodes · {view.edges.length} edges
+        {dissolve && graph.nodes.size > view.nodes.length && (
+          <> ({graph.nodes.size - view.nodes.length} junction rows dissolved)</>
+        )}{' '}
+        · click a node to inspect · double-click to expand · drag background to pan · scroll to
+        zoom ·{' '}
+        <button className="link-button footer-link" onClick={() => setShowLog((s) => !s)}>
+          {showLog ? 'hide' : 'show'} SQL log
+        </button>
       </footer>
     </div>
   );

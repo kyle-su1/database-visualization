@@ -6,6 +6,7 @@ import {
   addSeed,
   countRelationship,
   emptyGraph,
+  expandAllNodes,
   expandMore,
   expandNode,
   expandRelationship,
@@ -13,6 +14,8 @@ import {
   REVERSE_EXPAND_LIMIT,
 } from '../../graph/session';
 import { relationshipsFor } from '../../schema/relationships';
+import { detectJunctionTables } from '../../schema/junctions';
+import { deriveView } from '../../graph/view';
 import type { DatabaseSchema } from '../types';
 
 const require = createRequire(import.meta.url);
@@ -176,6 +179,89 @@ describe('expandNode (graph session over the DataSource interface)', () => {
     const pill2 = [...state.pills.values()][0];
     expect(pill2.fetched).toBe(REVERSE_EXPAND_LIMIT * 2);
     expect(pill2.total).toBe(pill.total);
+  });
+
+  it('expandAllNodes expands exactly one hop per pass', async () => {
+    const artistT = schema.tables.find((t) => t.name === 'Artist')!;
+    const seedRow = (await ds.getRow('Artist', { ArtistId: 1 }))!;
+    let state = addSeed(emptyGraph(), artistT, seedRow);
+
+    // Pass 1: only the seed is unexpanded -> adds its 2 albums, nothing deeper.
+    const r1 = await expandAllNodes(ds, schema, state);
+    state = r1.state;
+    expect(r1.addedNodes).toBe(2);
+    expect([...state.nodes.values()].some((n) => n.table === 'Track')).toBe(false);
+
+    // Pass 2: the 2 albums expand -> tracks appear; seed is skipped (already done).
+    const r2 = await expandAllNodes(ds, schema, state);
+    state = r2.state;
+    expect([...state.nodes.values()].some((n) => n.table === 'Track')).toBe(true);
+
+    // Every pre-pass-2 node is now fully expanded.
+    for (const n of [...state.nodes.values()].filter((x) => x.table !== 'Track')) {
+      expect(isFullyExpanded(schema, state, n)).toBe(true);
+    }
+  });
+
+  it('detects junction tables: PlaylistTrack yes, InvoiceLine no', () => {
+    const junctions = detectJunctionTables(schema);
+    expect(junctions.has('PlaylistTrack')).toBe(true);
+    // 2 FKs but UnitPrice + Quantity payload -> not a junction
+    expect(junctions.has('InvoiceLine')).toBe(false);
+    expect(junctions.has('Album')).toBe(false);
+  });
+
+  it('auto-traverses junction rows and dissolves them in the view', async () => {
+    const playlistT = schema.tables.find((t) => t.name === 'Playlist')!;
+    const row = (await ds.getRow('Playlist', { PlaylistId: 1 }))!;
+    let state = addSeed(emptyGraph(), playlistT, row);
+    const node = [...state.nodes.values()][0];
+    const junctions = detectJunctionTables(schema);
+    const rel = relationshipsFor(schema, 'Playlist').find(
+      (r) => r.kind === 'reverse' && r.childTable === 'PlaylistTrack',
+    )!;
+
+    const r = await expandRelationship(ds, schema, state, node, rel, { junctions });
+    state = r.state;
+
+    // Each junction row pulled in its Track partner automatically.
+    const tracks = [...state.nodes.values()].filter((n) => n.table === 'Track');
+    expect(tracks).toHaveLength(REVERSE_EXPAND_LIMIT);
+
+    // Dissolved view: junction rows hidden, replaced by direct Playlist—Track edges.
+    const view = deriveView(state, junctions);
+    expect(view.nodes.some((n) => n.table === 'PlaylistTrack')).toBe(false);
+    const dissolved = view.edges.filter((e) => e.dissolved);
+    expect(dissolved).toHaveLength(REVERSE_EXPAND_LIMIT);
+    expect(dissolved[0].source).toBe(node.id);
+    expect(dissolved[0].label).toContain('PlaylistTrack');
+
+    // Undissolved view keeps every row as a node (faithful mode).
+    const faithful = deriveView(state, new Set());
+    expect(faithful.nodes.filter((n) => n.table === 'PlaylistTrack')).toHaveLength(
+      REVERSE_EXPAND_LIMIT,
+    );
+    expect(faithful.edges.some((e) => e.dissolved)).toBe(false);
+  });
+
+  it('keeps junction rows visible when their partner is not fetched', async () => {
+    const playlistT = schema.tables.find((t) => t.name === 'Playlist')!;
+    const row = (await ds.getRow('Playlist', { PlaylistId: 1 }))!;
+    let state = addSeed(emptyGraph(), playlistT, row);
+    const node = [...state.nodes.values()][0];
+    const rel = relationshipsFor(schema, 'Playlist').find(
+      (r) => r.kind === 'reverse' && r.childTable === 'PlaylistTrack',
+    )!;
+
+    // Expand WITHOUT junction traversal: Track partners are missing.
+    const r = await expandRelationship(ds, schema, state, node, rel);
+    state = r.state;
+    const view = deriveView(state, detectJunctionTables(schema));
+    // Nothing to dissolve into -> rows stay visible instead of hiding data.
+    expect(view.nodes.filter((n) => n.table === 'PlaylistTrack')).toHaveLength(
+      REVERSE_EXPAND_LIMIT,
+    );
+    expect(view.edges.some((e) => e.dissolved)).toBe(false);
   });
 
   it('handles self-referencing FKs (Employee.ReportsTo) without duplication', async () => {

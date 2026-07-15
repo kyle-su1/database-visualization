@@ -1,6 +1,7 @@
 import type {
   DataSource,
   DatabaseSchema,
+  FkSchema,
   PkValue,
   Row,
   SqlValue,
@@ -121,6 +122,16 @@ export interface ExpandResult {
   truncated: string[];
 }
 
+export interface ExpandOptions {
+  /**
+   * Junction tables to traverse THROUGH: when a reverse expansion pulls in
+   * rows of one of these tables, each row's other forward FK is followed
+   * immediately so both endpoints exist and the view can dissolve the row
+   * into a direct edge.
+   */
+  junctions?: Set<string>;
+}
+
 /** Expand a single relationship of a node. Idempotent per (node, relationship). */
 export async function expandRelationship(
   ds: DataSource,
@@ -128,6 +139,7 @@ export async function expandRelationship(
   state: GraphState,
   node: GraphNode,
   rel: Relationship,
+  opts: ExpandOptions = {},
 ): Promise<ExpandResult> {
   const d = draft(state);
   const rk = node.id + '::' + relKey(rel);
@@ -137,19 +149,7 @@ export async function expandRelationship(
 
   if (rel.kind === 'forward') {
     // child (this node) -> one parent row
-    const key: PkValue = {};
-    let hasNull = false;
-    rel.fk.columns.forEach((c, i) => {
-      const v = node.values[c];
-      if (v == null) hasNull = true;
-      else key[rel.fk.refColumns[i]] = v;
-    });
-    if (hasNull) return result(d); // nullable FK not set on this row
-    const row = await ds.getRow(rel.parentTable, key);
-    if (!row) return result(d); // dangling FK
-    const parent = makeNode(tableByName(schema, rel.parentTable), row);
-    addNode(d, parent);
-    addEdge(d, node.id, fkLabel, parent.id);
+    await forwardExpand(ds, schema, d, node, rel.fk, rel.childTable);
   } else {
     // parent (this node) <- many child rows
     const refValues = reverseRefValues(node, rel);
@@ -161,10 +161,15 @@ export async function expandRelationship(
       refValues,
       { limit: REVERSE_EXPAND_LIMIT },
     );
+    const childNodes: GraphNode[] = [];
     for (const row of rows) {
       const child = makeNode(childT, row);
       addNode(d, child);
       addEdge(d, child.id, fkLabel, node.id);
+      childNodes.push(child);
+    }
+    if (opts.junctions?.has(rel.childTable)) {
+      await traverseJunctionRows(ds, schema, d, childT, childNodes, rel.fk.id);
     }
     if (totalCount > rows.length) {
       d.truncated.push(`${rel.childTable} (${rows.length} of ${totalCount})`);
@@ -202,17 +207,72 @@ export async function expandNode(
   schema: DatabaseSchema,
   state: GraphState,
   node: GraphNode,
+  opts: ExpandOptions = {},
 ): Promise<ExpandResult> {
   let current = state;
   let addedNodes = 0;
   let addedEdges = 0;
   const truncated: string[] = [];
   for (const rel of relationshipsFor(schema, node.table)) {
-    const r = await expandRelationship(ds, schema, current, node, rel);
+    const r = await expandRelationship(ds, schema, current, node, rel, opts);
     current = r.state;
     addedNodes += r.addedNodes;
     addedEdges += r.addedEdges;
     truncated.push(...r.truncated);
+  }
+  return { state: current, addedNodes, addedEdges, truncated };
+}
+
+/**
+ * Expand every node that is not yet fully expanded, one hop each.
+ * Snapshots the node list first: nodes added during this pass are NOT
+ * expanded (strictly one hop per invocation).
+ */
+export async function expandAllNodes(
+  ds: DataSource,
+  schema: DatabaseSchema,
+  state: GraphState,
+  opts: ExpandOptions = {},
+): Promise<ExpandResult> {
+  const targets = [...state.nodes.values()].filter((n) => !isFullyExpanded(schema, state, n));
+  let current = state;
+  let addedNodes = 0;
+  let addedEdges = 0;
+  const truncated: string[] = [];
+  for (const node of targets) {
+    const r = await expandNode(ds, schema, current, node, opts);
+    current = r.state;
+    addedNodes += r.addedNodes;
+    addedEdges += r.addedEdges;
+    truncated.push(...r.truncated);
+  }
+  return { state: current, addedNodes, addedEdges, truncated };
+}
+
+/**
+ * Fetch the missing forward partners of junction-table rows already in the
+ * graph (used when junction dissolution is switched on mid-session).
+ */
+export async function completeJunctionNodes(
+  ds: DataSource,
+  schema: DatabaseSchema,
+  state: GraphState,
+  junctions: Set<string>,
+): Promise<ExpandResult> {
+  let current = state;
+  let addedNodes = 0;
+  let addedEdges = 0;
+  const truncated: string[] = [];
+  for (const node of [...state.nodes.values()]) {
+    if (!junctions.has(node.table)) continue;
+    for (const rel of relationshipsFor(schema, node.table)) {
+      if (rel.kind !== 'forward') continue;
+      const r = await expandRelationship(ds, schema, current, node, rel);
+      current = r.state;
+      addedNodes += r.addedNodes;
+      addedEdges += r.addedEdges;
+      truncated.push(...r.truncated);
+    }
   }
   return { state: current, addedNodes, addedEdges, truncated };
 }
@@ -292,6 +352,57 @@ function addEdge(d: Draft, childId: string, fkLabel: string, parentId: string): 
 
 function pillEdgeId(pill: PillNode): string {
   return `pill-edge|${pill.id}`;
+}
+
+/** Follow one FK on `node` to its single parent row; adds node + edge. */
+async function forwardExpand(
+  ds: DataSource,
+  schema: DatabaseSchema,
+  d: Draft,
+  node: GraphNode,
+  fk: FkSchema,
+  childTable: string,
+): Promise<void> {
+  const key: PkValue = {};
+  let hasNull = false;
+  fk.columns.forEach((c, i) => {
+    const v = node.values[c];
+    if (v == null) hasNull = true;
+    else key[fk.refColumns[i]] = v;
+  });
+  if (hasNull) return; // nullable FK not set on this row
+  const row = await ds.getRow(fk.refTable, key);
+  if (!row) return; // dangling FK
+  const parent = makeNode(tableByName(schema, fk.refTable), row);
+  addNode(d, parent);
+  addEdge(d, node.id, `${childTable}.${fk.columns.join('+')}`, parent.id);
+}
+
+/**
+ * For each junction row just pulled in, immediately follow its OTHER forward
+ * FK (the one not pointing back at the node being expanded), so the row can
+ * be dissolved into a direct edge in the view.
+ */
+async function traverseJunctionRows(
+  ds: DataSource,
+  schema: DatabaseSchema,
+  d: Draft,
+  junctionT: TableSchema,
+  rowNodes: GraphNode[],
+  viaFkId: number,
+): Promise<void> {
+  for (const rowNode of rowNodes) {
+    for (const fk of junctionT.fks) {
+      if (fk.id === viaFkId) continue;
+      const rk =
+        rowNode.id +
+        '::' +
+        relKey({ kind: 'forward', childTable: junctionT.name, fk, parentTable: fk.refTable });
+      if (d.state.expandedRels.has(rk)) continue;
+      d.state.expandedRels.add(rk);
+      await forwardExpand(ds, schema, d, rowNode, fk, junctionT.name);
+    }
+  }
 }
 
 /** Child-column -> value map for a reverse expansion, or null if any value is NULL. */
