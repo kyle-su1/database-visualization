@@ -2,7 +2,17 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { SqlJsDataSource } from './SqlJsDataSource';
-import { addSeed, emptyGraph, expandNode } from '../../graph/session';
+import {
+  addSeed,
+  countRelationship,
+  emptyGraph,
+  expandMore,
+  expandNode,
+  expandRelationship,
+  isFullyExpanded,
+  REVERSE_EXPAND_LIMIT,
+} from '../../graph/session';
+import { relationshipsFor } from '../../schema/relationships';
 import type { DatabaseSchema } from '../types';
 
 const require = createRequire(import.meta.url);
@@ -107,7 +117,7 @@ describe('expandNode (graph session over the DataSource interface)', () => {
     const r1 = await expandNode(ds, schema, state, seed);
     state = r1.state;
     expect(r1.addedNodes).toBe(2); // 2 AC/DC albums
-    expect(state.expanded.has(seed.id)).toBe(true);
+    expect(isFullyExpanded(schema, state, seed)).toBe(true);
 
     const albumNode = [...state.nodes.values()].find((n) => n.table === 'Album')!;
     const r2 = await expandNode(ds, schema, state, albumNode);
@@ -127,6 +137,45 @@ describe('expandNode (graph session over the DataSource interface)', () => {
     const r2 = await expandNode(ds, schema, r1.state, seed);
     expect(r2.addedNodes).toBe(0);
     expect(r2.addedEdges).toBe(0);
+  });
+
+  it('counts relationships without expanding', async () => {
+    const genreT = schema.tables.find((t) => t.name === 'Genre')!;
+    const row = (await ds.getRow('Genre', { GenreId: 1 }))!; // Rock
+    const state = addSeed(emptyGraph(), genreT, row);
+    const node = [...state.nodes.values()][0];
+    const rel = relationshipsFor(schema, 'Genre').find(
+      (r) => r.kind === 'reverse' && r.childTable === 'Track',
+    )!;
+    const count = await countRelationship(ds, node, rel);
+    expect(count).toBeGreaterThan(REVERSE_EXPAND_LIMIT);
+  });
+
+  it('truncates hub expansion into a pill and paginates with expandMore', async () => {
+    const genreT = schema.tables.find((t) => t.name === 'Genre')!;
+    const row = (await ds.getRow('Genre', { GenreId: 1 }))!; // Rock: hundreds of tracks
+    let state = addSeed(emptyGraph(), genreT, row);
+    const node = [...state.nodes.values()][0];
+    const rel = relationshipsFor(schema, 'Genre').find(
+      (r) => r.kind === 'reverse' && r.childTable === 'Track',
+    )!;
+
+    const r1 = await expandRelationship(ds, schema, state, node, rel);
+    state = r1.state;
+    expect(r1.addedNodes).toBe(REVERSE_EXPAND_LIMIT);
+    expect(r1.truncated).toHaveLength(1);
+    expect(state.pills.size).toBe(1);
+    const pill = [...state.pills.values()][0];
+    expect(pill.fetched).toBe(REVERSE_EXPAND_LIMIT);
+    expect(pill.total).toBeGreaterThan(REVERSE_EXPAND_LIMIT);
+
+    const r2 = await expandMore(ds, schema, state, pill);
+    state = r2.state;
+    expect(r2.addedNodes).toBe(REVERSE_EXPAND_LIMIT);
+    expect(state.nodes.size).toBe(1 + REVERSE_EXPAND_LIMIT * 2);
+    const pill2 = [...state.pills.values()][0];
+    expect(pill2.fetched).toBe(REVERSE_EXPAND_LIMIT * 2);
+    expect(pill2.total).toBe(pill.total);
   });
 
   it('handles self-referencing FKs (Employee.ReportsTo) without duplication', async () => {

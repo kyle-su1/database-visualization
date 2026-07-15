@@ -148,7 +148,7 @@ export class SqlJsDataSource implements DataSource {
     childTable: string,
     fkId: number,
     refValues: PkValue,
-    opts: { limit: number },
+    opts: { limit: number; offset?: number },
   ): Promise<{ rows: Row[]; totalCount: number }> {
     const t = this.assertTable(childTable);
     const fk = t.fks.find((f) => f.id === fkId);
@@ -165,8 +165,8 @@ export class SqlJsDataSource implements DataSource {
       params,
     )[0].n as number;
     const rows = this.run(
-      `SELECT ${this.selectList(t)} FROM ${q(t.name)} WHERE ${where} LIMIT ?`,
-      [...params, opts.limit],
+      `SELECT ${this.selectList(t)} FROM ${q(t.name)} WHERE ${where} LIMIT ? OFFSET ?`,
+      [...params, opts.limit, opts.offset ?? 0],
     );
     return { rows: rows.map((r) => this.toRow(t, r)), totalCount };
   }

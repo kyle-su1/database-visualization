@@ -9,7 +9,7 @@ import {
   type Simulation,
   type SimulationNodeDatum,
 } from 'd3-force';
-import type { GraphEdge, GraphNode } from '../graph/session';
+import type { GraphEdge, GraphNode, PillNode } from '../graph/session';
 
 const W = 1200;
 const H = 800;
@@ -26,18 +26,36 @@ interface SimLink {
 
 interface Props {
   nodes: GraphNode[];
+  pills: PillNode[];
   edges: GraphEdge[];
-  expandedIds: Set<string>;
+  selectedId: string | null;
+  isExpanded: (node: GraphNode) => boolean;
   colorFor: (table: string) => string;
   onNodeClick: (node: GraphNode) => void;
+  onNodeDoubleClick: (node: GraphNode) => void;
+  onPillClick: (pill: PillNode) => void;
 }
 
-export function GraphCanvas({ nodes, edges, expandedIds, colorFor, onNodeClick }: Props) {
+export function GraphCanvas({
+  nodes,
+  pills,
+  edges,
+  selectedId,
+  isExpanded,
+  colorFor,
+  onNodeClick,
+  onNodeDoubleClick,
+  onPillClick,
+}: Props) {
+  const svgRef = useRef<SVGSVGElement>(null);
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
   const simNodesRef = useRef(new Map<string, SimNode>());
   const simLinksRef = useRef<SimLink[]>([]);
   const nodeElsRef = useRef(new Map<string, SVGGElement>());
   const edgeElsRef = useRef(new Map<string, SVGLineElement>());
+  const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(
+    null,
+  );
 
   // d3-force owns positions; React owns membership. Positions are applied
   // directly to DOM attributes on each tick so React never re-renders per frame.
@@ -78,19 +96,22 @@ export function GraphCanvas({ nodes, edges, expandedIds, colorFor, onNodeClick }
     const sim = getSim();
     const simNodes = simNodesRef.current;
 
-    const ids = new Set(nodes.map((n) => n.id));
+    const ids = new Set([...nodes.map((n) => n.id), ...pills.map((p) => p.id)]);
     for (const id of [...simNodes.keys()]) {
       if (!ids.has(id)) simNodes.delete(id);
     }
-    // Spawn new nodes next to an already-placed neighbor so expansions grow
-    // outward instead of flying in from the center.
-    for (const n of nodes) {
-      if (simNodes.has(n.id)) continue;
+    // Spawn new elements next to an already-placed neighbor so expansions
+    // grow outward instead of flying in from the center.
+    const spawn = (id: string, nearId?: string) => {
+      if (simNodes.has(id)) return;
       let x = W / 2;
       let y = H / 2;
+      const candidates = nearId ? [nearId] : [];
       for (const e of edges) {
-        const otherId = e.source === n.id ? e.target : e.target === n.id ? e.source : null;
-        if (!otherId) continue;
+        if (e.source === id) candidates.push(e.target);
+        else if (e.target === id) candidates.push(e.source);
+      }
+      for (const otherId of candidates) {
         const other = simNodes.get(otherId);
         if (other && other.x != null && other.y != null) {
           x = other.x;
@@ -98,12 +119,14 @@ export function GraphCanvas({ nodes, edges, expandedIds, colorFor, onNodeClick }
           break;
         }
       }
-      simNodes.set(n.id, {
-        id: n.id,
+      simNodes.set(id, {
+        id,
         x: x + (Math.random() - 0.5) * 60,
         y: y + (Math.random() - 0.5) * 60,
       });
-    }
+    };
+    for (const n of nodes) spawn(n.id);
+    for (const p of pills) spawn(p.id, p.parentNodeId);
 
     simLinksRef.current = edges
       .filter((e) => simNodes.has(e.source) && simNodes.has(e.target))
@@ -113,7 +136,7 @@ export function GraphCanvas({ nodes, edges, expandedIds, colorFor, onNodeClick }
     (sim.force('link') as ForceLink<SimNode, SimLink>).links(simLinksRef.current);
     sim.alpha(0.9).restart();
     applyPositions();
-  }, [nodes, edges]);
+  }, [nodes, pills, edges]);
 
   useEffect(
     () => () => {
@@ -122,8 +145,58 @@ export function GraphCanvas({ nodes, edges, expandedIds, colorFor, onNodeClick }
     [],
   );
 
+  // ------------------------------------------------------------ drag + click
+
+  const toSvgPoint = (e: React.PointerEvent) => {
+    const ctm = svgRef.current!.getScreenCTM();
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm!.inverse());
+    return { x: p.x, y: p.y };
+  };
+
+  const startDrag = (id: string) => (e: React.PointerEvent<SVGGElement>) => {
+    const sn = simNodesRef.current.get(id);
+    if (!sn) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = toSvgPoint(e);
+    dragRef.current = { id, moved: false, startX: p.x, startY: p.y };
+    sn.fx = sn.x;
+    sn.fy = sn.y;
+    getSim().alphaTarget(0.25).restart();
+  };
+
+  const moveDrag = (id: string) => (e: React.PointerEvent<SVGGElement>) => {
+    const d = dragRef.current;
+    if (!d || d.id !== id) return;
+    const p = toSvgPoint(e);
+    if (Math.hypot(p.x - d.startX, p.y - d.startY) > 4) d.moved = true;
+    const sn = simNodesRef.current.get(id);
+    if (sn) {
+      sn.fx = p.x;
+      sn.fy = p.y;
+    }
+  };
+
+  const endDrag = (id: string, onClick: () => void) => (e: React.PointerEvent<SVGGElement>) => {
+    const d = dragRef.current;
+    if (!d || d.id !== id) return;
+    dragRef.current = null;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    getSim().alphaTarget(0);
+    const sn = simNodesRef.current.get(id);
+    if (sn) {
+      sn.fx = null;
+      sn.fy = null;
+    }
+    if (!d.moved) onClick();
+  };
+
+  const registerEl = (id: string) => (el: SVGGElement | null) => {
+    if (el) nodeElsRef.current.set(id, el);
+    else nodeElsRef.current.delete(id);
+  };
+
   return (
-    <svg className="graph-canvas" viewBox={`0 0 ${W} ${H}`}>
+    <svg ref={svgRef} className="graph-canvas" viewBox={`0 0 ${W} ${H}`}>
       <defs>
         <marker
           id="arrow"
@@ -156,24 +229,49 @@ export function GraphCanvas({ nodes, edges, expandedIds, colorFor, onNodeClick }
         {nodes.map((n) => (
           <g
             key={n.id}
-            ref={(el) => {
-              if (el) nodeElsRef.current.set(n.id, el);
-              else nodeElsRef.current.delete(n.id);
-            }}
-            className={'node' + (expandedIds.has(n.id) ? ' expanded' : '')}
-            onClick={() => onNodeClick(n)}
+            ref={registerEl(n.id)}
+            className={
+              'node' +
+              (isExpanded(n) ? ' expanded' : '') +
+              (n.id === selectedId ? ' selected' : '')
+            }
+            onPointerDown={startDrag(n.id)}
+            onPointerMove={moveDrag(n.id)}
+            onPointerUp={endDrag(n.id, () => onNodeClick(n))}
+            onDoubleClick={() => onNodeDoubleClick(n)}
           >
             <title>
               {`${n.table}\n` +
                 Object.entries(n.pk)
                   .map(([k, v]) => `${k} = ${String(v)}`)
                   .join('\n') +
-                (expandedIds.has(n.id) ? '\n(expanded)' : '\nclick to expand')}
+                '\nclick to inspect · double-click to expand all'}
             </title>
             <circle r={NODE_R} fill={colorFor(n.table)} />
             <text dy={NODE_R + 14}>{n.label}</text>
           </g>
         ))}
+        {pills.map((p) => {
+          const label = `+${p.total - p.fetched} more ${p.childTable}`;
+          const w = label.length * 6.2 + 16;
+          return (
+            <g
+              key={p.id}
+              ref={registerEl(p.id)}
+              className="pill"
+              onPointerDown={startDrag(p.id)}
+              onPointerMove={moveDrag(p.id)}
+              onPointerUp={endDrag(p.id, () => onPillClick(p))}
+            >
+              <title>{`${p.fetched} of ${p.total} ${p.childTable} rows loaded\nclick to load ${Math.min(
+                p.total - p.fetched,
+                25,
+              )} more`}</title>
+              <rect x={-w / 2} y={-11} width={w} height={22} rx={11} />
+              <text dy={4}>{label}</text>
+            </g>
+          );
+        })}
       </g>
     </svg>
   );

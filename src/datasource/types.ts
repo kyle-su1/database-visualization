@@ -76,13 +76,14 @@ export interface DataSource {
   /**
    * Reverse FK expansion: rows of `childTable` whose FK `fkId` points at
    * the given parent values. `refValues` is keyed by the CHILD fk columns.
-   * `totalCount` reports the untruncated match count.
+   * `totalCount` reports the untruncated match count; `limit: 0` is a
+   * count-only query. `offset` pages through truncated expansions.
    */
   getReferencingRows(
     childTable: string,
     fkId: number,
     refValues: PkValue,
-    opts: { limit: number },
+    opts: { limit: number; offset?: number },
   ): Promise<{ rows: Row[]; totalCount: number }>;
 
   /** Every SQL statement executed so far (for the query-log panel). */
