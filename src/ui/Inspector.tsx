@@ -15,7 +15,7 @@ interface Props {
   entries: RelEntry[];
   colorFor: (table: string) => string;
   onExpandRel: (rel: Relationship) => void;
-  onExpandAll: () => void;
+  onExpandDirection: (direction: 'forward' | 'reverse') => void;
   onClose: () => void;
 }
 
@@ -26,8 +26,11 @@ function fmt(v: SqlValue): string {
   return s.length > 60 ? s.slice(0, 59) + '…' : s;
 }
 
-export function Inspector({ node, entries, colorFor, onExpandRel, onExpandAll, onClose }: Props) {
-  const allExpanded = entries.every((e) => e.expanded);
+export function Inspector({ node, entries, colorFor, onExpandRel, onExpandDirection, onClose }: Props) {
+  const forward = entries.filter((e) => e.rel.kind === 'forward');
+  const reverse = entries.filter((e) => e.rel.kind === 'reverse');
+  // A direction is expandable while any of its relationships has rows left to pull in.
+  const canExpand = (group: RelEntry[]) => group.some((e) => !e.expanded && e.count !== 0);
   return (
     <div className="panel inspector">
       <div className="panel-title">
@@ -72,9 +75,28 @@ export function Inspector({ node, entries, colorFor, onExpandRel, onExpandAll, o
         {entries.length === 0 && <div className="empty">no foreign-key relationships</div>}
       </div>
       {entries.length > 1 && (
-        <button className="expand-all" disabled={allExpanded} onClick={onExpandAll}>
-          Expand all
-        </button>
+        <div className="expand-actions">
+          {forward.length > 0 && (
+            <button
+              className="expand-all"
+              disabled={!canExpand(forward)}
+              onClick={() => onExpandDirection('forward')}
+              title="Follow this row's foreign keys to the rows it references"
+            >
+              → outgoing ({forward.length})
+            </button>
+          )}
+          {reverse.length > 0 && (
+            <button
+              className="expand-all"
+              disabled={!canExpand(reverse)}
+              onClick={() => onExpandDirection('reverse')}
+              title="Pull in rows that reference this row"
+            >
+              ← incoming ({reverse.length})
+            </button>
+          )}
+        </div>
       )}
 
       <div className="section-label">Row</div>

@@ -353,6 +353,17 @@ main {
   width: 100%;
 }
 
+.expand-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.expand-actions .expand-all {
+  margin-top: 0;
+  flex: 1;
+}
+
 .values-table {
   width: 100%;
   border-collapse: collapse;

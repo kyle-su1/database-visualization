@@ -5,6 +5,8 @@ import {
   forceLink,
   forceManyBody,
   forceSimulation,
+  forceX,
+  forceY,
   type ForceLink,
   type Simulation,
   type SimulationNodeDatum,
@@ -86,8 +88,14 @@ export function GraphCanvas({
   const getSim = () => {
     if (!simRef.current) {
       simRef.current = forceSimulation<SimNode>([])
-        .force('charge', forceManyBody().strength(-350))
+        // distanceMax bounds repulsion range so disconnected clusters don't
+        // shove each other across the canvas.
+        .force('charge', forceManyBody().strength(-350).distanceMax(300))
         .force('center', forceCenter(W / 2, H / 2))
+        // Per-node gravity toward center keeps disconnected components from
+        // drifting apart (forceCenter only recenters the center of mass).
+        .force('x', forceX(W / 2).strength(0.05))
+        .force('y', forceY(H / 2).strength(0.05))
         .force('collide', forceCollide(NODE_R * 2.2))
         .force(
           'link',
@@ -226,14 +234,19 @@ export function GraphCanvas({
     dragRef.current = { id, moved: false, startX: p.x, startY: p.y };
     sn.fx = sn.x;
     sn.fy = sn.y;
-    getSim().alphaTarget(0.25).restart();
+    // Don't reheat the simulation here — a click to select shouldn't jiggle
+    // the graph. Heating happens in moveDrag once an actual drag begins.
   };
 
   const moveDrag = (id: string) => (e: React.PointerEvent<SVGGElement>) => {
     const d = dragRef.current;
     if (!d || d.id !== id) return;
     const p = toSvgPoint(e);
-    if (Math.hypot(p.x - d.startX, p.y - d.startY) > 4) d.moved = true;
+    if (!d.moved && Math.hypot(p.x - d.startX, p.y - d.startY) > 4) {
+      d.moved = true;
+      getSim().alphaTarget(0.25).restart();
+    }
+    if (!d.moved) return;
     const sn = simNodesRef.current.get(id);
     if (sn) {
       sn.fx = p.x;

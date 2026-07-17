@@ -154,6 +154,15 @@ export function App() {
     );
   };
 
+  const handleExpandDirection = (direction: 'forward' | 'reverse') => {
+    if (!ds || !schema || !selectedNode) return;
+    const label = direction === 'forward' ? 'outgoing' : 'incoming';
+    void runExpansion(
+      () => expandNode(ds, schema, graph, selectedNode, { ...expandOpts, direction }),
+      `${selectedNode.table}: ${selectedNode.label} (${label})`,
+    );
+  };
+
   const handleExpandRel = (rel: Relationship) => {
     if (!ds || !schema || !selectedNode) return;
     const desc = rel.kind === 'forward' ? `→ ${rel.parentTable}` : `← ${rel.childTable}`;
@@ -214,15 +223,23 @@ export function App() {
   );
   const stateTables = [...new Set([...graph.nodes.values()].map((n) => n.table))];
   const colorFor = (table: string) => (schema ? tableColor(schema, table) : '#999');
-  const unexpandedCount = schema
-    ? [...graph.nodes.values()].filter((n) => !isFullyExpanded(schema, graph, n)).length
-    : 0;
+  // Nodes with at least one still-unexpanded relationship in the given
+  // direction (both directions when omitted).
+  const unexpandedCount = (direction?: 'forward' | 'reverse') =>
+    schema
+      ? [...graph.nodes.values()].filter((n) =>
+          relationshipsFor(schema, n.table).some(
+            (r) => (!direction || r.kind === direction) && !isRelExpanded(graph, n.id, r),
+          ),
+        ).length
+      : 0;
 
-  const handleExpandAllNodes = () => {
+  const handleExpandAllNodes = (direction: 'forward' | 'reverse') => {
     if (!ds || !schema) return;
+    const what = direction === 'forward' ? 'outgoing' : 'incoming';
     void runExpansion(
-      () => expandAllNodes(ds, schema, graph, expandOpts),
-      `${unexpandedCount} unexpanded nodes (1 hop)`,
+      () => expandAllNodes(ds, schema, graph, { ...expandOpts, direction }),
+      `${unexpandedCount(direction)} nodes (1 hop, ${what})`,
     );
   };
 
@@ -276,11 +293,19 @@ export function App() {
         />
         <button
           className="header-button"
-          disabled={busy || unexpandedCount === 0}
-          onClick={handleExpandAllNodes}
-          title="Expand every unexpanded node by one hop"
+          disabled={busy || unexpandedCount('forward') === 0}
+          onClick={() => handleExpandAllNodes('forward')}
+          title="Expand every node one hop along its outgoing foreign keys"
         >
-          {busy ? 'Expanding…' : `Expand all nodes (${unexpandedCount})`}
+          {busy ? 'Expanding…' : `Expand all → outgoing (${unexpandedCount('forward')})`}
+        </button>
+        <button
+          className="header-button"
+          disabled={busy || unexpandedCount('reverse') === 0}
+          onClick={() => handleExpandAllNodes('reverse')}
+          title="Expand every node one hop along incoming references"
+        >
+          {busy ? 'Expanding…' : `Expand all ← incoming (${unexpandedCount('reverse')})`}
         </button>
         <label className="dissolve-toggle" title="Collapse junction-table rows into direct edges">
           <input
@@ -321,7 +346,7 @@ export function App() {
             entries={relEntries}
             colorFor={colorFor}
             onExpandRel={handleExpandRel}
-            onExpandAll={() => handleExpandAll(selectedNode)}
+            onExpandDirection={handleExpandDirection}
             onClose={() => setSelectedId(null)}
           />
         )}

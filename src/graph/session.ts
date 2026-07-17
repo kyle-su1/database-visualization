@@ -130,6 +130,12 @@ export interface ExpandOptions {
    * into a direct edge.
    */
   junctions?: Set<string>;
+  /**
+   * Restrict a node expansion to a single FK direction — 'forward' (follow
+   * this row's FKs to its parents) or 'reverse' (pull in rows that reference
+   * this row). Omitted = both. Ignored by expandRelationship (already scoped).
+   */
+  direction?: 'forward' | 'reverse';
 }
 
 /** Expand a single relationship of a node. Idempotent per (node, relationship). */
@@ -214,6 +220,7 @@ export async function expandNode(
   let addedEdges = 0;
   const truncated: string[] = [];
   for (const rel of relationshipsFor(schema, node.table)) {
+    if (opts.direction && rel.kind !== opts.direction) continue;
     const r = await expandRelationship(ds, schema, current, node, rel, opts);
     current = r.state;
     addedNodes += r.addedNodes;
