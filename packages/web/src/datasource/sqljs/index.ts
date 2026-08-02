@@ -4,7 +4,7 @@
  * Vite `?url` wasm import.
  */
 import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
-import type { DataSource } from '../types';
+import type { DataSource } from '@dbviz/shared';
 import { SqlJsDataSource } from './SqlJsDataSource';
 
 export async function createSqlJsDataSource(

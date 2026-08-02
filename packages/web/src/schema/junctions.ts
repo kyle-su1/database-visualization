@@ -1,4 +1,4 @@
-import type { DatabaseSchema } from '../datasource/types';
+import type { DatabaseSchema } from '@dbviz/shared';
 
 /**
  * Junction (many-to-many) table heuristic: exactly 2 FKs, and every column

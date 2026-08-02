@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DataSource, DatabaseSchema, Row } from '../datasource/types';
+import type { DataSource, DatabaseSchema, Row } from '@dbviz/shared';
 import { createSqlJsDataSource } from '../datasource/sqljs';
 import { tableColor } from '../schema/display';
 import { relationshipsFor, tableByName, type Relationship } from '../schema/relationships';
@@ -27,9 +27,18 @@ import { GraphCanvas } from './GraphCanvas';
 import { Legend } from './Legend';
 import { SeedPicker } from './SeedPicker';
 import { Inspector, type RelEntry } from './Inspector';
-import { QueryLog } from './QueryLog';
+import { QueryLog, type ExpansionSpan } from './QueryLog';
 
 const FIXTURE = 'Chinook.sqlite';
+
+/** Whole staggered reveal must finish within this, however many queries fired. */
+const MAX_REVEAL_TOTAL_MS = 2000;
+
+/** One reveal tick: the nodes/pills a single query fetched, shown together. */
+interface RevealGroup {
+  ids: string[];
+  delay: number;
+}
 
 export function App() {
   const [ds, setDs] = useState<DataSource | null>(null);
@@ -40,6 +49,9 @@ export function App() {
   const [dissolve, setDissolve] = useState(true);
   const [junctionOverrides, setJunctionOverrides] = useState<Map<string, boolean>>(new Map());
   const [showLog, setShowLog] = useState(false);
+  const [spans, setSpans] = useState<ExpansionSpan[]>([]);
+  const [staggerMs, setStaggerMs] = useState(40);
+  const [pendingReveal, setPendingReveal] = useState<RevealGroup[]>([]);
   const [status, setStatus] = useState('Loading database…');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -75,6 +87,8 @@ export function App() {
       setGraph(addSeed(emptyGraph(), seedTable, seedRow));
       setSelectedId(null);
       setJunctionOverrides(new Map());
+      setSpans([]); // new DataSource = new empty query log
+      setPendingReveal([]);
       setStatus(
         `${name} — ${dbSchema.tables.length} tables. Seeded ${seedTable.name}; click a node to inspect, double-click to expand.`,
       );
@@ -128,14 +142,27 @@ export function App() {
   }, [ds, schema, selectedId, selectedNode]);
 
   const runExpansion = async (fn: () => Promise<ExpandResult>, what: string) => {
-    if (expanding.current) return;
+    if (!ds || expanding.current) return;
     expanding.current = true;
     setBusy(true);
     setStatus(`Expanding ${what}…`);
+    // Snapshot the log so this expansion's queries become a labeled span —
+    // the visible cost of expanding row-by-row (the N+1 pattern).
+    const logStart = ds.getQueryLog().length;
     try {
       const result = await fn();
       setGraph(result.state);
-      let msg = `Expanded ${what} — +${result.addedNodes} nodes, +${result.addedEdges} edges`;
+      const queries = ds.getQueryLog().length - logStart;
+      setSpans((s) => [...s, { label: what, start: logStart, end: logStart + queries }]);
+      // Stagger arrival one query-batch at a time, so N+1 expansions visibly
+      // drip in while a single-query fetch pops in as one block.
+      if (staggerMs > 0 && result.addedGroups.length > 1) {
+        const delay = Math.min(staggerMs, MAX_REVEAL_TOTAL_MS / result.addedGroups.length);
+        setPendingReveal((q) => [...q, ...result.addedGroups.map((ids) => ({ ids, delay }))]);
+      }
+      let msg =
+        `Expanded ${what} — +${result.addedNodes} nodes, +${result.addedEdges} edges` +
+        ` · ${queries} ${queries === 1 ? 'query' : 'queries'}`;
       if (result.truncated.length > 0) msg += ` · truncated: ${result.truncated.join(', ')}`;
       setStatus(msg);
     } catch (e: unknown) {
@@ -214,13 +241,42 @@ export function App() {
   const handleClear = () => {
     setGraph(emptyGraph());
     setSelectedId(null);
+    setPendingReveal([]);
     setStatus('Graph cleared — pick a seed row.');
+  };
+
+  // Pop the head reveal group after its delay; each pop re-renders with one
+  // more query's worth of nodes visible.
+  useEffect(() => {
+    if (pendingReveal.length === 0) return;
+    const t = setTimeout(() => setPendingReveal((q) => q.slice(1)), pendingReveal[0].delay);
+    return () => clearTimeout(t);
+  }, [pendingReveal]);
+
+  const handleStagger = (ms: number) => {
+    setStaggerMs(ms);
+    if (ms === 0) setPendingReveal([]); // flush: everything appears at once
   };
 
   const view = useMemo(
     () => deriveView(graph, dissolve ? junctions : new Set<string>()),
     [graph, dissolve, junctions],
   );
+
+  // Membership shown on canvas = derived view minus not-yet-revealed ids.
+  const hiddenIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const g of pendingReveal) for (const id of g.ids) s.add(id);
+    return s;
+  }, [pendingReveal]);
+  const visibleView = useMemo(() => {
+    if (hiddenIds.size === 0) return view;
+    return {
+      nodes: view.nodes.filter((n) => !hiddenIds.has(n.id)),
+      pills: view.pills.filter((p) => !hiddenIds.has(p.id)),
+      edges: view.edges.filter((e) => !hiddenIds.has(e.source) && !hiddenIds.has(e.target)),
+    };
+  }, [view, hiddenIds]);
   const stateTables = [...new Set([...graph.nodes.values()].map((n) => n.table))];
   const colorFor = (table: string) => (schema ? tableColor(schema, table) : '#999');
   // Nodes with at least one still-unexpanded relationship in the given
@@ -316,13 +372,30 @@ export function App() {
           dissolve junctions
           {junctions.size > 0 && <span className="dissolve-names">({[...junctions].join(', ')})</span>}
         </label>
+        <label
+          className="stagger-control"
+          title="Stagger node arrival: one batch per SQL query, so query count is visible as time (0 = instant)"
+        >
+          reveal
+          <input
+            type="range"
+            min={0}
+            max={150}
+            step={10}
+            value={staggerMs}
+            onChange={(e) => handleStagger(Number(e.target.value))}
+          />
+          <span className="stagger-value">
+            {staggerMs === 0 ? 'off' : `${staggerMs}ms/query`}
+          </span>
+        </label>
         <span className="status">{status}</span>
       </header>
       <main>
         <GraphCanvas
-          nodes={view.nodes}
-          pills={view.pills}
-          edges={view.edges}
+          nodes={visibleView.nodes}
+          pills={visibleView.pills}
+          edges={visibleView.edges}
           selectedId={selectedId}
           isExpanded={(n) => (schema ? isFullyExpanded(schema, graph, n) : false)}
           colorFor={colorFor}
@@ -356,14 +429,17 @@ export function App() {
           junctions={junctions}
           onToggleJunction={handleToggleJunction}
         />
-        {showLog && ds && <QueryLog entries={ds.getQueryLog()} onClose={() => setShowLog(false)} />}
+        {showLog && ds && (
+          <QueryLog entries={ds.getQueryLog()} spans={spans} onClose={() => setShowLog(false)} />
+        )}
       </main>
       <footer>
         {view.nodes.length} nodes · {view.edges.length} edges
         {dissolve && graph.nodes.size > view.nodes.length && (
           <> ({graph.nodes.size - view.nodes.length} junction rows dissolved)</>
         )}{' '}
-        · click a node to inspect · double-click to expand · drag background to pan · scroll to
+        · <span className="query-counter">{ds ? ds.getQueryLog().length : 0} SQL queries</span> ·
+        click a node to inspect · double-click to expand · drag background to pan · scroll to
         zoom ·{' '}
         <button className="link-button footer-link" onClick={() => setShowLog((s) => !s)}>
           {showLog ? 'hide' : 'show'} SQL log

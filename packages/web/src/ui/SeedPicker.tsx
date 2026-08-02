@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { DatabaseSchema, Row } from '../datasource/types';
+import type { DatabaseSchema, Row } from '@dbviz/shared';
 import { rowLabel } from '../schema/display';
 import { tableByName } from '../schema/relationships';
 

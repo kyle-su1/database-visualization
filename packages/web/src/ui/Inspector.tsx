@@ -1,4 +1,4 @@
-import type { SqlValue } from '../datasource/types';
+import type { SqlValue } from '@dbviz/shared';
 import type { Relationship } from '../schema/relationships';
 import type { GraphNode } from '../graph/session';
 

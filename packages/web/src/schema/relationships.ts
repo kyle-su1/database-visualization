@@ -1,4 +1,4 @@
-import type { DatabaseSchema, FkSchema, TableSchema } from '../datasource/types';
+import type { DatabaseSchema, FkSchema, TableSchema } from '@dbviz/shared';
 
 /**
  * One expandable relationship as seen FROM a given table.

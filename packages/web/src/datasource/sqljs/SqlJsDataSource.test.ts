@@ -16,7 +16,7 @@ import {
 import { relationshipsFor } from '../../schema/relationships';
 import { detectJunctionTables } from '../../schema/junctions';
 import { deriveView } from '../../graph/view';
-import type { DatabaseSchema } from '../types';
+import type { DatabaseSchema } from '@dbviz/shared';
 
 const require = createRequire(import.meta.url);
 

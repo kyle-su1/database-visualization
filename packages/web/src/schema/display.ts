@@ -1,4 +1,4 @@
-import type { DatabaseSchema, Row, TableSchema } from '../datasource/types';
+import type { DatabaseSchema, Row, TableSchema } from '@dbviz/shared';
 
 /** Tableau-10 palette, cycled by table position in the schema. */
 const PALETTE = [

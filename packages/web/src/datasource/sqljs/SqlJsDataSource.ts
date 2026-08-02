@@ -9,7 +9,7 @@ import type {
   Row,
   SqlValue,
   TableSchema,
-} from '../types';
+} from '@dbviz/shared';
 
 interface CreateOptions {
   /** Where to load sql-wasm.wasm from (browser: ?url asset, node tests: fs path). */

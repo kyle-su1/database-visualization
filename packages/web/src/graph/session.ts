@@ -6,7 +6,7 @@ import type {
   Row,
   SqlValue,
   TableSchema,
-} from '../datasource/types';
+} from '@dbviz/shared';
 import { relationshipsFor, tableByName, type Relationship } from '../schema/relationships';
 import { rowLabel } from '../schema/display';
 
@@ -120,6 +120,13 @@ export interface ExpandResult {
   addedEdges: number;
   /** Reverse relationships that hit REVERSE_EXPAND_LIMIT: "Track (25 of 214)". */
   truncated: string[];
+  /**
+   * Added node/pill ids grouped by the query that fetched them, in query
+   * order: a reverse expansion is ONE group (one query, many rows); each
+   * forward or junction-partner hop is its own single-id group. Drives the
+   * staggered-arrival animation — reveal cadence = real query cadence.
+   */
+  addedGroups: string[][];
 }
 
 export interface ExpandOptions {
@@ -168,14 +175,12 @@ export async function expandRelationship(
       { limit: REVERSE_EXPAND_LIMIT },
     );
     const childNodes: GraphNode[] = [];
+    const groupIds: string[] = [];
     for (const row of rows) {
       const child = makeNode(childT, row);
-      addNode(d, child);
+      if (addNode(d, child)) groupIds.push(child.id);
       addEdge(d, child.id, fkLabel, node.id);
       childNodes.push(child);
-    }
-    if (opts.junctions?.has(rel.childTable)) {
-      await traverseJunctionRows(ds, schema, d, childT, childNodes, rel.fk.id);
     }
     if (totalCount > rows.length) {
       d.truncated.push(`${rel.childTable} (${rows.length} of ${totalCount})`);
@@ -196,6 +201,12 @@ export async function expandRelationship(
         target: node.id,
         label: fkLabel,
       });
+      groupIds.push(pill.id); // the pill comes from the same query's totalCount
+    }
+    // ONE group: however many rows arrived, this was a single query.
+    if (groupIds.length > 0) d.groups.push(groupIds);
+    if (opts.junctions?.has(rel.childTable)) {
+      await traverseJunctionRows(ds, schema, d, childT, childNodes, rel.fk.id);
     }
   }
   return result(d);
@@ -219,6 +230,7 @@ export async function expandNode(
   let addedNodes = 0;
   let addedEdges = 0;
   const truncated: string[] = [];
+  const addedGroups: string[][] = [];
   for (const rel of relationshipsFor(schema, node.table)) {
     if (opts.direction && rel.kind !== opts.direction) continue;
     const r = await expandRelationship(ds, schema, current, node, rel, opts);
@@ -226,8 +238,9 @@ export async function expandNode(
     addedNodes += r.addedNodes;
     addedEdges += r.addedEdges;
     truncated.push(...r.truncated);
+    addedGroups.push(...r.addedGroups);
   }
-  return { state: current, addedNodes, addedEdges, truncated };
+  return { state: current, addedNodes, addedEdges, truncated, addedGroups };
 }
 
 /**
@@ -246,14 +259,16 @@ export async function expandAllNodes(
   let addedNodes = 0;
   let addedEdges = 0;
   const truncated: string[] = [];
+  const addedGroups: string[][] = [];
   for (const node of targets) {
     const r = await expandNode(ds, schema, current, node, opts);
     current = r.state;
     addedNodes += r.addedNodes;
     addedEdges += r.addedEdges;
     truncated.push(...r.truncated);
+    addedGroups.push(...r.addedGroups);
   }
-  return { state: current, addedNodes, addedEdges, truncated };
+  return { state: current, addedNodes, addedEdges, truncated, addedGroups };
 }
 
 /**
@@ -270,6 +285,7 @@ export async function completeJunctionNodes(
   let addedNodes = 0;
   let addedEdges = 0;
   const truncated: string[] = [];
+  const addedGroups: string[][] = [];
   for (const node of [...state.nodes.values()]) {
     if (!junctions.has(node.table)) continue;
     for (const rel of relationshipsFor(schema, node.table)) {
@@ -279,9 +295,10 @@ export async function completeJunctionNodes(
       addedNodes += r.addedNodes;
       addedEdges += r.addedEdges;
       truncated.push(...r.truncated);
+      addedGroups.push(...r.addedGroups);
     }
   }
-  return { state: current, addedNodes, addedEdges, truncated };
+  return { state: current, addedNodes, addedEdges, truncated, addedGroups };
 }
 
 /** Fetch the next page of a truncated expansion; shrinks or removes the pill. */
@@ -299,11 +316,14 @@ export async function expandMore(
     pill.refValues,
     { limit: REVERSE_EXPAND_LIMIT, offset: pill.fetched },
   );
+  const groupIds: string[] = [];
   for (const row of rows) {
     const child = makeNode(childT, row);
-    addNode(d, child);
+    if (addNode(d, child)) groupIds.push(child.id);
     addEdge(d, child.id, pill.fkLabel, pill.parentNodeId);
   }
+  if (groupIds.length > 0) d.groups.push(groupIds); // one page = one query
+
   const fetched = pill.fetched + rows.length;
   if (fetched >= totalCount || rows.length === 0) {
     d.state.pills.delete(pill.id);
@@ -322,6 +342,8 @@ interface Draft {
   addedNodes: number;
   addedEdges: number;
   truncated: string[];
+  /** Added ids per query — see ExpandResult.addedGroups. */
+  groups: string[][];
 }
 
 function draft(state: GraphState): Draft {
@@ -335,18 +357,26 @@ function draft(state: GraphState): Draft {
     addedNodes: 0,
     addedEdges: 0,
     truncated: [],
+    groups: [],
   };
 }
 
 function result(d: Draft): ExpandResult {
-  return { state: d.state, addedNodes: d.addedNodes, addedEdges: d.addedEdges, truncated: d.truncated };
+  return {
+    state: d.state,
+    addedNodes: d.addedNodes,
+    addedEdges: d.addedEdges,
+    truncated: d.truncated,
+    addedGroups: d.groups,
+  };
 }
 
-function addNode(d: Draft, n: GraphNode): void {
-  if (!d.state.nodes.has(n.id)) {
-    d.state.nodes.set(n.id, n);
-    d.addedNodes++;
-  }
+/** @returns true if the node was new (not already in the graph). */
+function addNode(d: Draft, n: GraphNode): boolean {
+  if (d.state.nodes.has(n.id)) return false;
+  d.state.nodes.set(n.id, n);
+  d.addedNodes++;
+  return true;
 }
 
 function addEdge(d: Draft, childId: string, fkLabel: string, parentId: string): void {
@@ -381,7 +411,7 @@ async function forwardExpand(
   const row = await ds.getRow(fk.refTable, key);
   if (!row) return; // dangling FK
   const parent = makeNode(tableByName(schema, fk.refTable), row);
-  addNode(d, parent);
+  if (addNode(d, parent)) d.groups.push([parent.id]); // one query, one node
   addEdge(d, node.id, `${childTable}.${fk.columns.join('+')}`, parent.id);
 }
 
