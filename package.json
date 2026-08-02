@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace @dbviz/web",
+    "dev:server": "npm run dev --workspace @dbviz/server",
+    "typecheck:server": "npm run typecheck --workspace @dbviz/server",
     "build": "npm run build --workspace @dbviz/web",
     "preview": "npm run preview --workspace @dbviz/web",
     "lint": "npm run lint --workspace @dbviz/web",
