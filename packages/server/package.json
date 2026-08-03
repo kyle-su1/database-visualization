@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --watch src/index.ts",
     "start": "node src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@dbviz/shared": "*",
@@ -16,6 +17,7 @@
     "pg": "^8.13.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
     "typescript": "^5.7.0"
