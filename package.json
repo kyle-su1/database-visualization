@@ -7,13 +7,13 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace @dbviz/web",
-    "dev:server": "npm run dev --workspace @dbviz/server",
-    "typecheck:server": "npm run typecheck --workspace @dbviz/server",
-    "test:server": "npm run test --workspace @dbviz/server",
-    "build": "npm run build --workspace @dbviz/web",
-    "preview": "npm run preview --workspace @dbviz/web",
-    "lint": "npm run lint --workspace @dbviz/web",
-    "test": "npm run test --workspace @dbviz/web"
+    "dev": "npm run dev --workspace @dbviz/frontend",
+    "dev:backend": "npm run dev --workspace @dbviz/backend",
+    "typecheck:backend": "npm run typecheck --workspace @dbviz/backend",
+    "test:backend": "npm run test --workspace @dbviz/backend",
+    "build": "npm run build --workspace @dbviz/frontend",
+    "preview": "npm run preview --workspace @dbviz/frontend",
+    "lint": "npm run lint --workspace @dbviz/frontend",
+    "test": "npm run test --workspace @dbviz/frontend"
   }
 }
