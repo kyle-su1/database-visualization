@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { DataSource, DatabaseSchema, Row } from '@dbviz/shared';
+import type { DataSource, DatabaseSchema, Row, TableSchema } from '@dbviz/shared';
 import { createSqlJsDataSource } from '../datasource/sqljs';
+import { createHttpDataSource } from '../datasource/http';
 import { tableColor } from '../schema/display';
 import { relationshipsFor, tableByName, type Relationship } from '../schema/relationships';
 import { detectJunctionTables, effectiveJunctions } from '../schema/junctions';
@@ -40,6 +41,23 @@ interface RevealGroup {
   delay: number;
 }
 
+/**
+ * Choose a seed row without assuming rowCount is exact: Postgres rowCounts are
+ * reltuples estimates (0 until ANALYZE), so probe tables largest-first and take
+ * the first that actually returns a row. Works identically for sql.js (exact).
+ */
+async function pickSeed(
+  source: DataSource,
+  schema: DatabaseSchema,
+): Promise<{ table: TableSchema; row: Row } | null> {
+  const byRows = [...schema.tables].sort((a, b) => b.rowCount - a.rowCount);
+  for (const table of byRows) {
+    const [row] = await source.getRows(table.name, { limit: 1 });
+    if (row) return { table, row };
+  }
+  return null;
+}
+
 export function App() {
   const [ds, setDs] = useState<DataSource | null>(null);
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
@@ -71,30 +89,41 @@ export function App() {
     [dissolve, junctions],
   );
 
-  const loadDatabase = useCallback(
-    async (bytes: Uint8Array, name: string) => {
-      const source = await createSqlJsDataSource(bytes, name);
+  // Swap in a DataSource (sql.js file or server-backed Postgres) and seed the
+  // graph. Everything below the DataSource boundary is oblivious to which one.
+  const activateSource = useCallback(
+    async (source: DataSource, label: string) => {
       const dbSchema = await source.getSchema();
-      const seedTable = dbSchema.tables.find((t) => t.rowCount > 0);
-      if (!seedTable) {
+      const seed = await pickSeed(source, dbSchema);
+      if (!seed) {
         source.dispose?.();
-        throw new Error(`${name} contains no rows`);
+        throw new Error(`${label} has no rows to seed from`);
       }
-      const [seedRow] = await source.getRows(seedTable.name, { limit: 1 });
       ds?.dispose?.();
       setDs(source);
       setSchema(dbSchema);
-      setGraph(addSeed(emptyGraph(), seedTable, seedRow));
+      setGraph(addSeed(emptyGraph(), seed.table, seed.row));
       setSelectedId(null);
       setJunctionOverrides(new Map());
       setSpans([]); // new DataSource = new empty query log
       setPendingReveal([]);
       setStatus(
-        `${name} — ${dbSchema.tables.length} tables. Seeded ${seedTable.name}; click a node to inspect, double-click to expand.`,
+        `${label} — ${dbSchema.tables.length} tables. Seeded ${seed.table.name}; click a node to inspect, double-click to expand.`,
       );
     },
     [ds],
   );
+
+  const loadDatabase = useCallback(
+    async (bytes: Uint8Array, name: string) => {
+      await activateSource(await createSqlJsDataSource(bytes, name), name);
+    },
+    [activateSource],
+  );
+
+  const connectToServer = useCallback(async () => {
+    await activateSource(createHttpDataSource(), 'Postgres (server)');
+  }, [activateSource]);
 
   useEffect(() => {
     let cancelled = false;
@@ -119,6 +148,15 @@ export function App() {
       await loadDatabase(bytes, file.name);
     } catch (e: unknown) {
       setStatus(`Failed to load ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleConnectServer = async () => {
+    try {
+      setStatus('Connecting to the server’s Postgres…');
+      await connectToServer();
+    } catch (e: unknown) {
+      setStatus(`Failed to connect: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -347,6 +385,13 @@ export function App() {
             e.target.value = '';
           }}
         />
+        <button
+          className="header-button"
+          onClick={() => void handleConnectServer()}
+          title="Connect to the Postgres database configured on the server"
+        >
+          Connect to Postgres
+        </button>
         <button
           className="header-button"
           disabled={busy || unexpandedCount('forward') === 0}
