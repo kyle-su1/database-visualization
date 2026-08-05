@@ -496,6 +496,39 @@ async function mapLimit<T, R>(
   return out;
 }
 
+const sameKeyValue = (a: SqlValue | undefined, b: SqlValue | undefined): boolean =>
+  a != null && b != null && String(a) === String(b);
+
+/**
+ * How many rows on the other side of `rel` are ALREADY nodes in the graph.
+ *
+ * Expanding a relationship whose rows are all present adds no nodes — it only
+ * draws the edges — because node identity is table + PK, so re-fetched rows
+ * converge onto the existing nodes. Callers use this to distinguish "this pulls
+ * in new rows" from "this just connects things already on screen". Purely local:
+ * it reads the current graph, never the DataSource.
+ */
+export function alreadyPresent(
+  state: GraphState,
+  node: GraphNode,
+  rel: Relationship,
+): number {
+  // forward: this row's FK values identify the single parent row.
+  // reverse: children are the rows whose FK columns match this row's values.
+  const [table, theirCols, wanted] =
+    rel.kind === 'forward'
+      ? [rel.parentTable, rel.fk.refColumns, rel.fk.columns.map((c) => node.values[c])]
+      : [rel.childTable, rel.fk.columns, rel.fk.refColumns.map((c) => node.values[c])];
+  if (wanted.some((v) => v == null)) return 0;
+
+  let n = 0;
+  for (const other of state.nodes.values()) {
+    if (other.table !== table) continue;
+    if (theirCols.every((c, i) => sameKeyValue(other.values[c], wanted[i]))) n++;
+  }
+  return n;
+}
+
 /** Child-column -> value map for a reverse expansion, or null if any value is NULL. */
 function reverseRefValues(node: GraphNode, rel: Relationship): PkValue | null {
   const refValues: PkValue = {};

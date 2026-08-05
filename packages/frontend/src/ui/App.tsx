@@ -7,6 +7,7 @@ import { relationshipsFor, tableByName, type Relationship } from '../schema/rela
 import { detectJunctionTables, effectiveJunctions } from '../schema/junctions';
 import {
   addSeed,
+  alreadyPresent,
   completeJunctionNodes,
   countRelationship,
   emptyGraph,
@@ -67,6 +68,7 @@ export function App() {
   const [dissolve, setDissolve] = useState(true);
   const [junctionOverrides, setJunctionOverrides] = useState<Map<string, boolean>>(new Map());
   const [showLog, setShowLog] = useState(false);
+  const [relayoutKey, setRelayoutKey] = useState(0);
   const [spans, setSpans] = useState<ExpansionSpan[]>([]);
   const [staggerMs, setStaggerMs] = useState(40);
   const [pendingReveal, setPendingReveal] = useState<RevealGroup[]>([]);
@@ -360,6 +362,7 @@ export function App() {
           key: relKey(rel),
           expanded: isRelExpanded(graph, selectedNode.id, rel),
           count: counts[relKey(rel)] ?? null,
+          present: alreadyPresent(graph, selectedNode, rel),
         }))
       : [];
 
@@ -424,6 +427,13 @@ export function App() {
         >
           {busy ? 'Expanding…' : `Expand all ← incoming (${unexpandedCount('reverse')})`}
         </button>
+        <button
+          className="header-button"
+          onClick={() => setRelayoutKey((k) => k + 1)}
+          title="Unpin every node and let the whole graph settle into a new shape"
+        >
+          Re-layout
+        </button>
         <label className="dissolve-toggle" title="Collapse junction-table rows into direct edges">
           <input
             type="checkbox"
@@ -458,6 +468,7 @@ export function App() {
           pills={visibleView.pills}
           edges={visibleView.edges}
           selectedId={selectedId}
+          relayoutKey={relayoutKey}
           isExpanded={(n) => (schema ? isFullyExpanded(schema, graph, n) : false)}
           colorFor={colorFor}
           onNodeClick={(n) => setSelectedId(n.id)}

@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react';
 import {
-  forceCenter,
   forceCollide,
   forceLink,
   forceManyBody,
@@ -18,6 +17,21 @@ const W = 1200;
 const H = 800;
 const NODE_R = 16;
 
+/** Sub-pixel movement isn't visible; skip the DOM write. */
+const MOVE_EPSILON = 0.4;
+/** Settle threshold — see alphaMin below. */
+const ALPHA_MIN = 0.02;
+/** Reheat for new arrivals: enough to place them, not to relaunch the graph. */
+const REHEAT_ALPHA = 0.3;
+/** Full re-layout (everything unpinned) gets a proper shake. */
+const RELAYOUT_ALPHA = 0.9;
+/** How far from a change nodes are unpinned so they can make room for it. */
+const RELAX_RADIUS = 220;
+/** Energy injected when a drag starts, so neighbours react immediately. */
+const DRAG_ALPHA = 0.4;
+/** Keeps the freed neighbourhood live while a drag is in progress. */
+const DRAG_ALPHA_TARGET = 0.2;
+
 interface SimNode extends SimulationNodeDatum {
   id: string;
 }
@@ -32,6 +46,8 @@ interface Props {
   pills: PillNode[];
   edges: ViewEdge[];
   selectedId: string | null;
+  /** Changing this unpins every node and re-runs the layout from scratch. */
+  relayoutKey: number;
   isExpanded: (node: GraphNode) => boolean;
   colorFor: (table: string) => string;
   onNodeClick: (node: GraphNode) => void;
@@ -44,6 +60,7 @@ export function GraphCanvas({
   pills,
   edges,
   selectedId,
+  relayoutKey,
   isExpanded,
   colorFor,
   onNodeClick,
@@ -61,26 +78,90 @@ export function GraphCanvas({
   const simLinksRef = useRef<SimLink[]>([]);
   const nodeElsRef = useRef(new Map<string, SVGGElement>());
   const edgeElsRef = useRef(new Map<string, SVGLineElement>());
+  /** Last position written to the DOM per node, for dirty-checking ticks. */
+  const writtenRef = useRef(new Map<string, { x: number; y: number }>());
   const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(
     null,
   );
 
   // d3-force owns positions; React owns membership. Positions are applied
   // directly to DOM attributes on each tick so React never re-renders per frame.
-  const applyPositions = () => {
+  //
+  // Only what actually moved gets written: past a few hundred nodes the
+  // per-tick DOM writes, not the force math, are what makes the canvas feel
+  // heavy, and once the layout is pinned most nodes are stationary every tick.
+  const applyPositions = (force = false) => {
+    const written = writtenRef.current;
+    const moved = new Set<string>();
     for (const n of simNodesRef.current.values()) {
-      const el = nodeElsRef.current.get(n.id);
-      if (el) el.setAttribute('transform', `translate(${n.x ?? W / 2},${n.y ?? H / 2})`);
+      const x = n.x ?? W / 2;
+      const y = n.y ?? H / 2;
+      const prev = written.get(n.id);
+      if (!force && prev && Math.abs(prev.x - x) < MOVE_EPSILON && Math.abs(prev.y - y) < MOVE_EPSILON) {
+        continue;
+      }
+      written.set(n.id, { x, y });
+      moved.add(n.id);
+      nodeElsRef.current.get(n.id)?.setAttribute('transform', `translate(${x},${y})`);
     }
+    if (!force && moved.size === 0) return; // nothing shifted: skip the edge pass
     for (const l of simLinksRef.current) {
-      const el = edgeElsRef.current.get(l.id);
       const s = l.source as SimNode;
       const t = l.target as SimNode;
-      if (el && typeof s === 'object' && typeof t === 'object') {
-        el.setAttribute('x1', String(s.x ?? 0));
-        el.setAttribute('y1', String(s.y ?? 0));
-        el.setAttribute('x2', String(t.x ?? 0));
-        el.setAttribute('y2', String(t.y ?? 0));
+      if (typeof s !== 'object' || typeof t !== 'object') continue;
+      if (!force && !moved.has(s.id) && !moved.has(t.id)) continue;
+      const el = edgeElsRef.current.get(l.id);
+      if (!el) continue;
+      el.setAttribute('x1', String(s.x ?? 0));
+      el.setAttribute('y1', String(s.y ?? 0));
+      el.setAttribute('x2', String(t.x ?? 0));
+      el.setAttribute('y2', String(t.y ?? 0));
+    }
+  };
+
+  /**
+   * Free the neighbourhood around `seedIds` so it can reorganise: the seeds
+   * themselves, anything linked to them, and anything sitting close enough to
+   * be in the way. The rest of the graph stays pinned — so a local change
+   * (new rows, a drag) stays local instead of relaunching the whole layout,
+   * while still letting nodes push each other apart.
+   */
+  const relaxAround = (seedIds: Set<string>) => {
+    if (seedIds.size === 0) return;
+    const free = new Set(seedIds);
+    for (const l of simLinksRef.current) {
+      const s = typeof l.source === 'object' ? l.source.id : l.source;
+      const t = typeof l.target === 'object' ? l.target.id : l.target;
+      if (seedIds.has(s)) free.add(t);
+      if (seedIds.has(t)) free.add(s);
+    }
+    const anchors = [...seedIds]
+      .map((id) => simNodesRef.current.get(id))
+      .filter((n): n is SimNode => n?.x != null && n?.y != null);
+    for (const n of simNodesRef.current.values()) {
+      if (free.has(n.id) || n.x == null || n.y == null) continue;
+      for (const a of anchors) {
+        if (Math.hypot(n.x - a.x!, n.y - a.y!) < RELAX_RADIUS) {
+          free.add(n.id);
+          break;
+        }
+      }
+    }
+    for (const id of free) {
+      const n = simNodesRef.current.get(id);
+      if (n) {
+        n.fx = null;
+        n.fy = null;
+      }
+    }
+  };
+
+  /** Freeze every placed node where it sits, so later arrivals can't shove it. */
+  const pinSettled = () => {
+    for (const n of simNodesRef.current.values()) {
+      if (n.x != null && n.y != null) {
+        n.fx = n.x;
+        n.fy = n.y;
       }
     }
   };
@@ -91,17 +172,27 @@ export function GraphCanvas({
         // distanceMax bounds repulsion range so disconnected clusters don't
         // shove each other across the canvas.
         .force('charge', forceManyBody().strength(-350).distanceMax(300))
-        .force('center', forceCenter(W / 2, H / 2))
-        // Per-node gravity toward center keeps disconnected components from
-        // drifting apart (forceCenter only recenters the center of mass).
-        .force('x', forceX(W / 2).strength(0.05))
-        .force('y', forceY(H / 2).strength(0.05))
+        // NO forceCenter here. It re-centres the whole graph by rewriting every
+        // node's position each tick, at full strength. With most of the layout
+        // pinned those nodes snap straight back to their fx/fy, so the centroid
+        // never converges and the entire correction lands on the handful of
+        // unpinned nodes — which visibly teleport away on the first tick after
+        // an expansion. Gentle per-node gravity does the same job safely, since
+        // it acts through velocity and only on nodes that are free to move.
+        .force('x', forceX(W / 2).strength(0.02))
+        .force('y', forceY(H / 2).strength(0.02))
         .force('collide', forceCollide(NODE_R * 2.2))
         .force(
           'link',
           forceLink<SimNode, SimLink>([]).id((d) => d.id).distance(90),
         )
-        .on('tick', applyPositions);
+        // Stop early rather than crawling to the default 0.001: the last
+        // stretch is imperceptible motion that costs a tick over every node.
+        .alphaMin(ALPHA_MIN)
+        .on('tick', () => applyPositions())
+        // d3 fires 'end' once alpha falls below alphaMin — the layout has
+        // settled, so lock it in.
+        .on('end', pinSettled);
     }
     return simRef.current;
   };
@@ -112,12 +203,17 @@ export function GraphCanvas({
 
     const ids = new Set([...nodes.map((n) => n.id), ...pills.map((p) => p.id)]);
     for (const id of [...simNodes.keys()]) {
-      if (!ids.has(id)) simNodes.delete(id);
+      if (!ids.has(id)) {
+        simNodes.delete(id);
+        writtenRef.current.delete(id);
+      }
     }
+    const arrived = new Set<string>();
     // Spawn new elements next to an already-placed neighbor so expansions
     // grow outward instead of flying in from the center.
     const spawn = (id: string, nearId?: string) => {
       if (simNodes.has(id)) return;
+      arrived.add(id);
       let x = W / 2;
       let y = H / 2;
       const candidates = nearId ? [nearId] : [];
@@ -148,9 +244,29 @@ export function GraphCanvas({
 
     sim.nodes([...simNodes.values()]);
     (sim.force('link') as ForceLink<SimNode, SimLink>).links(simLinksRef.current);
-    sim.alpha(0.9).restart();
-    applyPositions();
+    // Only reheat when something actually arrived, and only around where it
+    // landed: newcomers and their immediate surroundings are freed so they can
+    // spread out, while the rest of the graph holds its shape.
+    if (arrived.size > 0) {
+      relaxAround(arrived);
+      sim.alpha(REHEAT_ALPHA).restart();
+    }
+    applyPositions(true);
   }, [nodes, pills, edges]);
+
+  // Full re-layout: unpin everything and let the graph find a fresh shape.
+  const firstRelayout = useRef(true);
+  useEffect(() => {
+    if (firstRelayout.current) {
+      firstRelayout.current = false;
+      return;
+    }
+    for (const n of simNodesRef.current.values()) {
+      n.fx = null;
+      n.fy = null;
+    }
+    getSim().alpha(RELAYOUT_ALPHA).restart();
+  }, [relayoutKey]);
 
   useEffect(
     () => () => {
@@ -244,7 +360,15 @@ export function GraphCanvas({
     const p = toSvgPoint(e);
     if (!d.moved && Math.hypot(p.x - d.startX, p.y - d.startY) > 4) {
       d.moved = true;
-      getSim().alphaTarget(0.25).restart();
+      // Free what this node is attached to, so the local graph follows the drag
+      // instead of the node tearing away from a frozen picture. Distant nodes
+      // stay pinned, so the cost is the neighbourhood, not the whole graph.
+      relaxAround(new Set([id]));
+      // alpha() must be set explicitly: restart() only restarts the timer, so
+      // resuming a cooled simulation would ramp up from ~alphaMin at a couple
+      // of percent per tick — the neighbourhood would barely react. alphaTarget
+      // then holds that energy for as long as the drag lasts.
+      getSim().alpha(DRAG_ALPHA).alphaTarget(DRAG_ALPHA_TARGET).restart();
     }
     if (!d.moved) return;
     const sn = simNodesRef.current.get(id);
@@ -259,12 +383,9 @@ export function GraphCanvas({
     if (!d || d.id !== id) return;
     dragRef.current = null;
     e.currentTarget.releasePointerCapture(e.pointerId);
+    // Let the neighbourhood settle, then 'end' re-pins everything. The dragged
+    // node keeps its fx/fy: you put it there deliberately, so it stays.
     getSim().alphaTarget(0);
-    const sn = simNodesRef.current.get(id);
-    if (sn) {
-      sn.fx = null;
-      sn.fy = null;
-    }
     if (!d.moved) onClick();
   };
 

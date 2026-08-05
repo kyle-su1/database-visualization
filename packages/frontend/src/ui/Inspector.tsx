@@ -8,6 +8,8 @@ export interface RelEntry {
   expanded: boolean;
   /** null while the count is still loading. */
   count: number | null;
+  /** How many of those rows are already nodes on the canvas. */
+  present: number;
 }
 
 interface Props {
@@ -43,7 +45,11 @@ export function Inspector({ node, entries, colorFor, onExpandRel, onExpandDirect
 
       <div className="section-label">Relationships</div>
       <div className="rel-list">
-        {entries.map(({ rel, key, expanded, count }) => (
+        {entries.map(({ rel, key, expanded, count, present }) => {
+          // Every row on the other side is already on the canvas, so this adds
+          // edges only — say "connect" rather than promising new rows.
+          const edgesOnly = count !== null && count > 0 && present >= count;
+          return (
           <div key={key} className="rel-item">
             <span className="rel-desc">
               {rel.kind === 'forward' ? (
@@ -62,16 +68,27 @@ export function Inspector({ node, entries, colorFor, onExpandRel, onExpandDirect
             </span>
             <span className="rel-count">
               {count === null ? '…' : rel.kind === 'forward' && count === 0 ? 'null' : count}
+              {count !== null && present > 0 && (
+                <span className="rel-present">
+                  {edgesOnly ? ' on canvas' : ` · ${present} on canvas`}
+                </span>
+              )}
             </span>
             <button
               className="expand-button"
               disabled={expanded || count === 0}
               onClick={() => onExpandRel(rel)}
+              title={
+                edgesOnly
+                  ? 'Every row on the other side is already on the canvas — this just draws the edge'
+                  : undefined
+              }
             >
-              {expanded ? '✓' : 'expand'}
+              {expanded ? '✓' : edgesOnly ? 'connect' : 'expand'}
             </button>
           </div>
-        ))}
+          );
+        })}
         {entries.length === 0 && <div className="empty">no foreign-key relationships</div>}
       </div>
       {entries.length > 1 && (
