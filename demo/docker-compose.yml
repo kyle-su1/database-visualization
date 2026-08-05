@@ -1,0 +1,33 @@
+name: dbviz-demo
+
+services:
+  postgres:
+    # pgvector image = Postgres 18 (for uuidv7()) + the `vector` extension,
+    # both of which Pagila's current schema requires.
+    image: pgvector/pgvector:pg18
+    container_name: dbviz-postgres
+    environment:
+      # Pagila's dump sets object ownership to the "postgres" role, so the
+      # superuser must be named postgres (not a custom role).
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pagila
+    ports:
+      # Host 5433 (not 5432) to avoid clashing with a native Postgres install.
+      - '5433:5432'
+    volumes:
+      # Scripts here run ONCE, on first init of an empty data volume, in
+      # filename order: 01 loads Chinook, 02 ANALYZEs so rowCounts are real.
+      # Re-seed with: docker compose down -v && docker compose up.
+      - ./seed:/docker-entrypoint-initdb.d:ro
+      # postgres:18 stores data under a version-specific subdir, so mount the
+      # volume at the parent (not /var/lib/postgresql/data).
+      - dbviz-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d pagila']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  dbviz-pgdata:

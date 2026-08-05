@@ -30,7 +30,9 @@ const TABLES_SQL = `
   SELECT c.relname AS name, GREATEST(c.reltuples, 0)::bigint AS row_estimate
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')
+  WHERE n.nspname = $1
+    AND c.relkind IN ('r', 'p')  -- ordinary + partitioned tables
+    AND NOT c.relispartition      -- hide partition children; keep the parent
   ORDER BY c.relname`;
 
 const COLUMNS_SQL = `

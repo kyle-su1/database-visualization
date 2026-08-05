@@ -42,16 +42,16 @@ interface RevealGroup {
 }
 
 /**
- * Choose a seed row without assuming rowCount is exact: Postgres rowCounts are
- * reltuples estimates (0 until ANALYZE), so probe tables largest-first and take
- * the first that actually returns a row. Works identically for sql.js (exact).
+ * Choose a seed row by probing tables in schema order and taking the first that
+ * actually returns a row. Probing (rather than trusting rowCount) is robust to
+ * Postgres reltuples estimates being 0 before ANALYZE, and keeps the seed a
+ * meaningful early table rather than whichever happens to be largest.
  */
 async function pickSeed(
   source: DataSource,
   schema: DatabaseSchema,
 ): Promise<{ table: TableSchema; row: Row } | null> {
-  const byRows = [...schema.tables].sort((a, b) => b.rowCount - a.rowCount);
-  for (const table of byRows) {
+  for (const table of schema.tables) {
     const [row] = await source.getRows(table.name, { limit: 1 });
     if (row) return { table, row };
   }
@@ -74,6 +74,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const expanding = useRef(false);
+  /** Bumped per data-source activation; stale async results check it before writing state. */
+  const sourceEpoch = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const detected = useMemo(
@@ -93,8 +95,16 @@ export function App() {
   // graph. Everything below the DataSource boundary is oblivious to which one.
   const activateSource = useCallback(
     async (source: DataSource, label: string) => {
+      // Claim an epoch up front. Anything still in flight from the previous
+      // source (a slow expansion, the startup fixture load) is now stale and
+      // must not write back over this one's schema/graph.
+      const epoch = ++sourceEpoch.current;
       const dbSchema = await source.getSchema();
       const seed = await pickSeed(source, dbSchema);
+      if (epoch !== sourceEpoch.current) {
+        source.dispose?.(); // a newer activation superseded this one
+        return;
+      }
       if (!seed) {
         source.dispose?.();
         throw new Error(`${label} has no rows to seed from`);
@@ -131,7 +141,9 @@ export function App() {
       const res = await fetch(import.meta.env.BASE_URL + FIXTURE);
       if (!res.ok) throw new Error(`Failed to fetch ${FIXTURE}: ${res.status}`);
       const buf = new Uint8Array(await res.arrayBuffer());
-      if (!cancelled) await loadDatabase(buf, FIXTURE);
+      // Skip if the user already picked a source (e.g. connected to Postgres)
+      // while the fixture was still downloading — don't clobber their choice.
+      if (!cancelled && sourceEpoch.current === 0) await loadDatabase(buf, FIXTURE);
     })().catch((e: unknown) => {
       if (!cancelled) setError(e instanceof Error ? e.message : String(e));
     });
@@ -187,8 +199,12 @@ export function App() {
     // Snapshot the log so this expansion's queries become a labeled span —
     // the visible cost of expanding row-by-row (the N+1 pattern).
     const logStart = ds.getQueryLog().length;
+    const epoch = sourceEpoch.current;
     try {
       const result = await fn();
+      // The data source changed while this was running: its result describes a
+      // graph from the old database, so drop it rather than overwrite.
+      if (epoch !== sourceEpoch.current) return;
       setGraph(result.state);
       const queries = ds.getQueryLog().length - logStart;
       setSpans((s) => [...s, { label: what, start: logStart, end: logStart + queries }]);

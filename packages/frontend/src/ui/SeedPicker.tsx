@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { DatabaseSchema, Row } from '@dbviz/shared';
 import { rowLabel } from '../schema/display';
-import { tableByName } from '../schema/relationships';
 
 interface Props {
   schema: DatabaseSchema;
@@ -21,6 +20,15 @@ export function SeedPicker({ schema, colorFor, search, onPick, onClear, hasGraph
   // is never rendered against a newly selected table's schema.
   const [result, setResult] = useState<{ table: string; rows: Row[] }>({ table, rows: [] });
 
+  // Switching data sources swaps the schema underneath us; the remembered
+  // table may not exist in the new one (e.g. SQLite "Album" vs Postgres
+  // "album"). Reset it so lookups stay valid.
+  useEffect(() => {
+    if (!schema.tables.some((x) => x.name === table)) {
+      setTable((schema.tables.find((x) => x.rowCount > 0) ?? schema.tables[0]).name);
+    }
+  }, [schema, table]);
+
   useEffect(() => {
     let cancelled = false;
     search(table, text)
@@ -33,7 +41,9 @@ export function SeedPicker({ schema, colorFor, search, onPick, onClear, hasGraph
     };
   }, [table, text, search]);
 
-  const t = tableByName(schema, table);
+  // Fall back to a valid table for the render before the reset effect runs,
+  // so we never throw on a stale table name.
+  const t = schema.tables.find((x) => x.name === table) ?? schema.tables[0];
   const rows = result.table === table ? result.rows : [];
 
   return (

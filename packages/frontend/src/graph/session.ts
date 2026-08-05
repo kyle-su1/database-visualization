@@ -53,6 +53,13 @@ export interface GraphState {
 /** How many children one reverse expansion may pull in (v1 hub guardrail). */
 export const REVERSE_EXPAND_LIMIT = 25;
 
+/**
+ * Max DataSource fetches in flight per expansion step. Over HTTP each fetch is
+ * a round trip, so batching them is what keeps an expansion responsive; the cap
+ * keeps the server's connection pool (and the browser) from being swamped.
+ */
+const FETCH_CONCURRENCY = 8;
+
 export function emptyGraph(): GraphState {
   return { nodes: new Map(), edges: new Map(), pills: new Map(), expandedRels: new Set() };
 }
@@ -400,16 +407,33 @@ async function forwardExpand(
   fk: FkSchema,
   childTable: string,
 ): Promise<void> {
-  const key: PkValue = {};
-  let hasNull = false;
-  fk.columns.forEach((c, i) => {
-    const v = node.values[c];
-    if (v == null) hasNull = true;
-    else key[fk.refColumns[i]] = v;
-  });
-  if (hasNull) return; // nullable FK not set on this row
+  const key = forwardKey(node, fk);
+  if (!key) return; // nullable FK not set on this row
   const row = await ds.getRow(fk.refTable, key);
   if (!row) return; // dangling FK
+  applyForward(d, schema, node, fk, childTable, row);
+}
+
+/** Parent-side key for following `fk` from `node`; null if any FK column is NULL. */
+function forwardKey(node: GraphNode, fk: FkSchema): PkValue | null {
+  const key: PkValue = {};
+  for (let i = 0; i < fk.columns.length; i++) {
+    const v = node.values[fk.columns[i]];
+    if (v == null) return null;
+    key[fk.refColumns[i]] = v;
+  }
+  return key;
+}
+
+/** Add the parent row fetched for a forward FK, plus the edge pointing at it. */
+function applyForward(
+  d: Draft,
+  schema: DatabaseSchema,
+  node: GraphNode,
+  fk: FkSchema,
+  childTable: string,
+  row: Row,
+): void {
   const parent = makeNode(tableByName(schema, fk.refTable), row);
   if (addNode(d, parent)) d.groups.push([parent.id]); // one query, one node
   addEdge(d, node.id, `${childTable}.${fk.columns.join('+')}`, parent.id);
@@ -428,6 +452,10 @@ async function traverseJunctionRows(
   rowNodes: GraphNode[],
   viaFkId: number,
 ): Promise<void> {
+  // Collect every partner row up front, then fetch the whole batch with bounded
+  // concurrency. Fetching these one await at a time is the dominant cost of an
+  // expansion over HTTP: one blocking round trip per junction row.
+  const pending: { rowNode: GraphNode; fk: FkSchema; key: PkValue }[] = [];
   for (const rowNode of rowNodes) {
     for (const fk of junctionT.fks) {
       if (fk.id === viaFkId) continue;
@@ -437,9 +465,35 @@ async function traverseJunctionRows(
         relKey({ kind: 'forward', childTable: junctionT.name, fk, parentTable: fk.refTable });
       if (d.state.expandedRels.has(rk)) continue;
       d.state.expandedRels.add(rk);
-      await forwardExpand(ds, schema, d, rowNode, fk, junctionT.name);
+      const key = forwardKey(rowNode, fk);
+      if (key) pending.push({ rowNode, fk, key });
     }
   }
+  const rows = await mapLimit(pending, FETCH_CONCURRENCY, (p) => ds.getRow(p.fk.refTable, p.key));
+  // Apply in request order, so nodes and edges land deterministically
+  // regardless of the order responses came back in.
+  rows.forEach((row, i) => {
+    if (!row) return; // dangling FK
+    const p = pending[i];
+    applyForward(d, schema, p.rowNode, p.fk, junctionT.name, row);
+  });
+}
+
+/** Run `fn` over `items` with bounded concurrency, preserving result order. */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < items.length; i = next++) {
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 /** Child-column -> value map for a reverse expansion, or null if any value is NULL. */
