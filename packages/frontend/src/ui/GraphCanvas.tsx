@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   forceCollide,
   forceLink,
@@ -7,6 +7,8 @@ import {
   forceX,
   forceY,
   type ForceLink,
+  type ForceX,
+  type ForceY,
   type Simulation,
   type SimulationNodeDatum,
 } from 'd3-force';
@@ -15,7 +17,27 @@ import type { ViewEdge } from '../graph/view';
 
 const W = 1200;
 const H = 800;
-const NODE_R = 16;
+/** Node radius scales with how many edges a row has, so hubs read as hubs. */
+const NODE_R_MIN = 10;
+const NODE_R_MAX = 26;
+/** Reference count at which a node reaches full size; beyond this it stops. */
+const DEGREE_FOR_MAX = 16;
+/** Breathing room forceCollide keeps around each node, on top of its radius. */
+const COLLIDE_PAD = 13;
+/** Gap between an arrowhead and the circle it points at. */
+const ARROW_GAP = 3;
+/** Marker geometry: the path tip sits at x = ARROW_LEN. */
+const ARROW_LEN = 12;
+
+/**
+ * Area — not radius — grows with degree, so a node with four times the
+ * connections looks twice as wide rather than four times, which is how people
+ * actually read circle sizes.
+ */
+function radiusForDegree(degree: number): number {
+  const t = Math.min(1, Math.sqrt(degree / DEGREE_FOR_MAX));
+  return NODE_R_MIN + (NODE_R_MAX - NODE_R_MIN) * t;
+}
 
 /** Sub-pixel movement isn't visible; skip the DOM write. */
 const MOVE_EPSILON = 0.4;
@@ -25,6 +47,10 @@ const ALPHA_MIN = 0.02;
 const REHEAT_ALPHA = 0.3;
 /** Full re-layout (everything unpinned) gets a proper shake. */
 const RELAYOUT_ALPHA = 0.9;
+/** Centering pull, applied only during a full re-layout. */
+const RELAYOUT_GRAVITY = 0.05;
+/** Ring radius new rows are placed on around their parent. */
+const SPAWN_RADIUS = 70;
 /** How far from a change nodes are unpinned so they can make room for it. */
 const RELAX_RADIUS = 220;
 /** Energy injected when a drag starts, so neighbours react immediately. */
@@ -51,7 +77,6 @@ interface Props {
   isExpanded: (node: GraphNode) => boolean;
   colorFor: (table: string) => string;
   onNodeClick: (node: GraphNode) => void;
-  onNodeDoubleClick: (node: GraphNode) => void;
   onPillClick: (pill: PillNode) => void;
 }
 
@@ -64,7 +89,6 @@ export function GraphCanvas({
   isExpanded,
   colorFor,
   onNodeClick,
-  onNodeDoubleClick,
   onPillClick,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -80,6 +104,29 @@ export function GraphCanvas({
   const edgeElsRef = useRef(new Map<string, SVGLineElement>());
   /** Last position written to the DOM per node, for dirty-checking ticks. */
   const writtenRef = useRef(new Map<string, { x: number; y: number }>());
+
+  // Edge count per node drives its radius. Derived during render so the circles
+  // resize in the same paint the new edges appear in; mirrored into a ref so
+  // the force and the tick handler (which live outside React) can read it too.
+  const degree = useMemo(() => {
+    const d = new Map<string, number>();
+    const bump = (id: string) => d.set(id, (d.get(id) ?? 0) + 1);
+    for (const e of edges) {
+      // Count references INTO a row, not out of it. How many FKs a row points
+      // out along is fixed by its table's schema, so counting those would size
+      // rows by which table they came from rather than by how central they are.
+      bump(e.target);
+      // A dissolved junction edge stands for a many-to-many association and its
+      // direction is arbitrary (whichever forward edge deriveView saw first),
+      // so it counts for both partners.
+      if (e.dissolved) bump(e.source);
+    }
+    return d;
+  }, [edges]);
+  const degreeRef = useRef(degree);
+  degreeRef.current = degree;
+
+  const radiusOf = (id: string) => radiusForDegree(degreeRef.current.get(id) ?? 0);
   const dragRef = useRef<{ id: string; moved: boolean; startX: number; startY: number } | null>(
     null,
   );
@@ -112,10 +159,21 @@ export function GraphCanvas({
       if (!force && !moved.has(s.id) && !moved.has(t.id)) continue;
       const el = edgeElsRef.current.get(l.id);
       if (!el) continue;
-      el.setAttribute('x1', String(s.x ?? 0));
-      el.setAttribute('y1', String(s.y ?? 0));
-      el.setAttribute('x2', String(t.x ?? 0));
-      el.setAttribute('y2', String(t.y ?? 0));
+      const sx = s.x ?? 0;
+      const sy = s.y ?? 0;
+      const tx = t.x ?? 0;
+      const ty = t.y ?? 0;
+      // Stop the line just short of the target circle. Node radii now vary, so
+      // the arrowhead can't be offset by a constant in the marker — it would
+      // sink inside big nodes and float away from small ones.
+      const dx = tx - sx;
+      const dy = ty - sy;
+      const len = Math.hypot(dx, dy) || 1;
+      const back = radiusOf(t.id) + ARROW_GAP;
+      el.setAttribute('x1', String(sx));
+      el.setAttribute('y1', String(sy));
+      el.setAttribute('x2', String(tx - (dx / len) * back));
+      el.setAttribute('y2', String(ty - (dy / len) * back));
     }
   };
 
@@ -156,8 +214,21 @@ export function GraphCanvas({
     }
   };
 
+  /**
+   * Centering gravity: wanted while a full re-layout compacts the whole graph,
+   * unwanted during incremental growth (it would tug freshly-unpinned nodes,
+   * including the one just expanded, back toward the middle of the canvas).
+   */
+  const setGravity = (strength: number) => {
+    const sim = simRef.current;
+    if (!sim) return;
+    (sim.force('x') as ForceX<SimNode>).strength(strength);
+    (sim.force('y') as ForceY<SimNode>).strength(strength);
+  };
+
   /** Freeze every placed node where it sits, so later arrivals can't shove it. */
   const pinSettled = () => {
+    setGravity(0); // a re-layout is over by the time we settle
     for (const n of simNodesRef.current.values()) {
       if (n.x != null && n.y != null) {
         n.fx = n.x;
@@ -177,11 +248,18 @@ export function GraphCanvas({
         // pinned those nodes snap straight back to their fx/fy, so the centroid
         // never converges and the entire correction lands on the handful of
         // unpinned nodes — which visibly teleport away on the first tick after
-        // an expansion. Gentle per-node gravity does the same job safely, since
-        // it acts through velocity and only on nodes that are free to move.
-        .force('x', forceX(W / 2).strength(0.02))
-        .force('y', forceY(H / 2).strength(0.02))
-        .force('collide', forceCollide(NODE_R * 2.2))
+        // an expansion.
+        //
+        // Centering gravity starts at zero for the same reason: it pulls
+        // whatever is currently unpinned toward the middle, which drags the
+        // node you just expanded away from where you left it. It is switched on
+        // only for a full re-layout (see setGravity).
+        .force('x', forceX(W / 2).strength(0))
+        .force('y', forceY(H / 2).strength(0))
+        .force(
+          'collide',
+          forceCollide<SimNode>().radius((d) => radiusOf(d.id) + COLLIDE_PAD),
+        )
         .force(
           'link',
           forceLink<SimNode, SimLink>([]).id((d) => d.id).distance(90),
@@ -209,6 +287,9 @@ export function GraphCanvas({
       }
     }
     const arrived = new Set<string>();
+    // Count of rows already placed around each parent this pass, so a batch
+    // fans out around it instead of landing in one pile.
+    const placedNear = new Map<string, number>();
     // Spawn new elements next to an already-placed neighbor so expansions
     // grow outward instead of flying in from the center.
     const spawn = (id: string, nearId?: string) => {
@@ -216,6 +297,7 @@ export function GraphCanvas({
       arrived.add(id);
       let x = W / 2;
       let y = H / 2;
+      let anchor = '';
       const candidates = nearId ? [nearId] : [];
       for (const e of edges) {
         if (e.source === id) candidates.push(e.target);
@@ -226,13 +308,22 @@ export function GraphCanvas({
         if (other && other.x != null && other.y != null) {
           x = other.x;
           y = other.y;
+          anchor = otherId;
           break;
         }
       }
+      // Lay the batch out on a spiral around the parent rather than dropping 25
+      // rows on the same point: piled-up nodes repel each other hard enough to
+      // shove the parent (and its neighbourhood) across the canvas before the
+      // layout untangles.
+      const i = placedNear.get(anchor) ?? 0;
+      placedNear.set(anchor, i + 1);
+      const angle = i * 2.39996; // golden angle: successive rows land apart
+      const radius = SPAWN_RADIUS * Math.sqrt(1 + i * 0.5);
       simNodes.set(id, {
         id,
-        x: x + (Math.random() - 0.5) * 60,
-        y: y + (Math.random() - 0.5) * 60,
+        x: x + Math.cos(angle) * radius,
+        y: y + Math.sin(angle) * radius,
       });
     };
     for (const n of nodes) spawn(n.id);
@@ -244,13 +335,14 @@ export function GraphCanvas({
 
     sim.nodes([...simNodes.values()]);
     (sim.force('link') as ForceLink<SimNode, SimLink>).links(simLinksRef.current);
-    // Only reheat when something actually arrived, and only around where it
-    // landed: newcomers and their immediate surroundings are freed so they can
-    // spread out, while the rest of the graph holds its shape.
-    if (arrived.size > 0) {
-      relaxAround(arrived);
-      sim.alpha(REHEAT_ALPHA).restart();
-    }
+    // Reheat only when something actually arrived — and deliberately DON'T
+    // unpin anything already on screen. Freeing the expanded node would let its
+    // existing links haul it back toward its neighbours (and out of wherever
+    // you put it) before the new rows even appear. New nodes are unpinned by
+    // construction, they spawn spread around their parent, and collision
+    // resolves against pinned nodes one-sidedly — so the newcomers find their
+    // own space while the map you've built stays exactly as it is.
+    if (arrived.size > 0) sim.alpha(REHEAT_ALPHA).restart();
     applyPositions(true);
   }, [nodes, pills, edges]);
 
@@ -265,6 +357,10 @@ export function GraphCanvas({
       n.fx = null;
       n.fy = null;
     }
+    // Everything is free now, so centering gravity is safe and wanted: it pulls
+    // the graph back into a compact shape. pinSettled turns it off again.
+    getSim();
+    setGravity(RELAYOUT_GRAVITY);
     getSim().alpha(RELAYOUT_ALPHA).restart();
   }, [relayoutKey]);
 
@@ -405,12 +501,14 @@ export function GraphCanvas({
       onPointerCancel={endPan}
     >
       <defs>
+        {/* refX puts the path's tip at the line's end point, which
+            applyPositions has already pulled back to the target circle's edge. */}
         <marker
           id="arrow"
           markerUnits="userSpaceOnUse"
           markerWidth="12"
           markerHeight="12"
-          refX={NODE_R + 11}
+          refX={ARROW_LEN}
           refY="6"
           orient="auto"
         >
@@ -434,31 +532,35 @@ export function GraphCanvas({
         ))}
       </g>
       <g>
-        {nodes.map((n) => (
-          <g
-            key={n.id}
-            ref={registerEl(n.id)}
-            className={
-              'node' +
-              (isExpanded(n) ? ' expanded' : '') +
-              (n.id === selectedId ? ' selected' : '')
-            }
-            onPointerDown={startDrag(n.id)}
-            onPointerMove={moveDrag(n.id)}
-            onPointerUp={endDrag(n.id, () => onNodeClick(n))}
-            onDoubleClick={() => onNodeDoubleClick(n)}
-          >
-            <title>
-              {`${n.table}\n` +
-                Object.entries(n.pk)
-                  .map(([k, v]) => `${k} = ${String(v)}`)
-                  .join('\n') +
-                '\nclick to inspect · double-click to expand all'}
-            </title>
-            <circle r={NODE_R} fill={colorFor(n.table)} />
-            <text dy={NODE_R + 14}>{n.label}</text>
-          </g>
-        ))}
+        {nodes.map((n) => {
+          const deg = degree.get(n.id) ?? 0;
+          const r = radiusForDegree(deg);
+          return (
+            <g
+              key={n.id}
+              ref={registerEl(n.id)}
+              className={
+                'node' +
+                (isExpanded(n) ? ' expanded' : '') +
+                (n.id === selectedId ? ' selected' : '')
+              }
+              onPointerDown={startDrag(n.id)}
+              onPointerMove={moveDrag(n.id)}
+              onPointerUp={endDrag(n.id, () => onNodeClick(n))}
+            >
+              <title>
+                {`${n.table}\n` +
+                  Object.entries(n.pk)
+                    .map(([k, v]) => `${k} = ${String(v)}`)
+                    .join('\n') +
+                  `\nreferenced by ${deg} shown ${deg === 1 ? 'row' : 'rows'}` +
+                  '\nclick to inspect'}
+              </title>
+              <circle r={r} fill={colorFor(n.table)} />
+              <text dy={r + 14}>{n.label}</text>
+            </g>
+          );
+        })}
         {pills.map((p) => {
           const label = `+${p.total - p.fetched} more ${p.childTable}`;
           const w = label.length * 6.2 + 16;

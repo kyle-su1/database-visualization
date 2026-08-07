@@ -20,7 +20,6 @@ import {
   makeNode,
   relKey,
   type ExpandResult,
-  type GraphNode,
   type GraphState,
   type PillNode,
 } from '../graph/session';
@@ -64,7 +63,13 @@ export function App() {
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
   const [graph, setGraph] = useState<GraphState>(emptyGraph());
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [counts, setCounts] = useState<Record<string, number>>({});
+  // Counts are tagged with the node they were measured for: two rows of the
+  // same table share relationship keys, so an untagged map would show the
+  // previously selected row's counts until the new fetch lands.
+  const [counts, setCounts] = useState<{ forNode: string | null; byRel: Record<string, number> }>({
+    forNode: null,
+    byRel: {},
+  });
   const [dissolve, setDissolve] = useState(true);
   const [junctionOverrides, setJunctionOverrides] = useState<Map<string, boolean>>(new Map());
   const [showLog, setShowLog] = useState(false);
@@ -120,7 +125,7 @@ export function App() {
       setSpans([]); // new DataSource = new empty query log
       setPendingReveal([]);
       setStatus(
-        `${label} — ${dbSchema.tables.length} tables. Seeded ${seed.table.name}; click a node to inspect, double-click to expand.`,
+        `${label} — ${dbSchema.tables.length} tables. Seeded ${seed.table.name}; click a node to inspect and expand it.`,
       );
     },
     [ds],
@@ -186,7 +191,7 @@ export function App() {
       const entries = await Promise.all(
         rels.map(async (rel) => [relKey(rel), await countRelationship(ds, selectedNode, rel)]),
       );
-      if (!cancelled) setCounts(Object.fromEntries(entries));
+      if (!cancelled) setCounts({ forNode: selectedNode.id, byRel: Object.fromEntries(entries) });
     })().catch(() => {});
     return () => {
       cancelled = true;
@@ -227,14 +232,6 @@ export function App() {
       expanding.current = false;
       setBusy(false);
     }
-  };
-
-  const handleExpandAll = (node: GraphNode) => {
-    if (!ds || !schema) return;
-    void runExpansion(
-      () => expandNode(ds, schema, graph, node, expandOpts),
-      `${node.table}: ${node.label}`,
-    );
   };
 
   const handleExpandDirection = (direction: 'forward' | 'reverse') => {
@@ -361,7 +358,18 @@ export function App() {
           rel,
           key: relKey(rel),
           expanded: isRelExpanded(graph, selectedNode.id, rel),
-          count: counts[relKey(rel)] ?? null,
+          // A forward FK needs no query — it's one row if the FK is set, none
+          // if it's NULL — so resolve it locally and never show a stale value.
+          // Reverse counts come from the database, and are only trusted once
+          // they've been measured for THIS node.
+          count:
+            rel.kind === 'forward'
+              ? rel.fk.columns.every((c) => selectedNode.values[c] != null)
+                ? 1
+                : 0
+              : counts.forNode === selectedNode.id
+                ? (counts.byRel[relKey(rel)] ?? null)
+                : null,
           present: alreadyPresent(graph, selectedNode, rel),
         }))
       : [];
@@ -460,9 +468,14 @@ export function App() {
             {staggerMs === 0 ? 'off' : `${staggerMs}ms/query`}
           </span>
         </label>
-        <span className="status">{status}</span>
       </header>
       <main>
+        {/* Status floats over the canvas rather than sitting in the header:
+            these messages are long and variable-length, and inline they
+            reflowed the whole top bar every time an expansion finished. */}
+        <div className="status-toast" role="status">
+          {status}
+        </div>
         <GraphCanvas
           nodes={visibleView.nodes}
           pills={visibleView.pills}
@@ -472,7 +485,6 @@ export function App() {
           isExpanded={(n) => (schema ? isFullyExpanded(schema, graph, n) : false)}
           colorFor={colorFor}
           onNodeClick={(n) => setSelectedId(n.id)}
-          onNodeDoubleClick={handleExpandAll}
           onPillClick={handlePillClick}
         />
         {schema && (
@@ -511,8 +523,7 @@ export function App() {
           <> ({graph.nodes.size - view.nodes.length} junction rows dissolved)</>
         )}{' '}
         · <span className="query-counter">{ds ? ds.getQueryLog().length : 0} SQL queries</span> ·
-        click a node to inspect · double-click to expand · drag background to pan · scroll to
-        zoom ·{' '}
+        click a node to inspect · drag background to pan · scroll to zoom ·{' '}
         <button className="link-button footer-link" onClick={() => setShowLog((s) => !s)}>
           {showLog ? 'hide' : 'show'} SQL log
         </button>
