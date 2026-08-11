@@ -386,8 +386,13 @@ function addNode(d: Draft, n: GraphNode): boolean {
   return true;
 }
 
+/** Edge identity: FK owner, the FK itself, and the row it points at. */
+export function edgeIdFor(childId: string, fkLabel: string, parentId: string): string {
+  return `${childId} -${fkLabel}-> ${parentId}`;
+}
+
 function addEdge(d: Draft, childId: string, fkLabel: string, parentId: string): void {
-  const id = `${childId} -${fkLabel}-> ${parentId}`;
+  const id = edgeIdFor(childId, fkLabel, parentId);
   if (!d.state.edges.has(id)) {
     d.state.edges.set(id, { id, source: childId, target: parentId, label: fkLabel });
     d.addedEdges++;
@@ -499,34 +504,53 @@ async function mapLimit<T, R>(
 const sameKeyValue = (a: SqlValue | undefined, b: SqlValue | undefined): boolean =>
   a != null && b != null && String(a) === String(b);
 
+export interface RelPresence {
+  /** Rows on the other side of `rel` that are already nodes in the graph. */
+  present: number;
+  /** How many of those are already joined to this node by the edge. */
+  linked: number;
+}
+
 /**
- * How many rows on the other side of `rel` are ALREADY nodes in the graph.
+ * What expanding `rel` from `node` would actually change, judged from the graph
+ * alone — no queries.
  *
- * Expanding a relationship whose rows are all present adds no nodes — it only
- * draws the edges — because node identity is table + PK, so re-fetched rows
- * converge onto the existing nodes. Callers use this to distinguish "this pulls
- * in new rows" from "this just connects things already on screen". Purely local:
- * it reads the current graph, never the DataSource.
+ * Both node and edge identity are deterministic (table + PK; FK owner + FK +
+ * target), so a re-fetched row converges onto the node that's already there and
+ * a re-derived edge onto the edge that's already there. That gives three cases
+ * a caller can distinguish: rows still to fetch, rows present but not yet
+ * joined (an edge would appear), and everything already on screen (nothing
+ * would happen at all — which is the case where a naive UI promises an action
+ * and then does nothing visible).
  */
-export function alreadyPresent(
+export function relationshipPresence(
   state: GraphState,
   node: GraphNode,
   rel: Relationship,
-): number {
+): RelPresence {
   // forward: this row's FK values identify the single parent row.
   // reverse: children are the rows whose FK columns match this row's values.
   const [table, theirCols, wanted] =
     rel.kind === 'forward'
       ? [rel.parentTable, rel.fk.refColumns, rel.fk.columns.map((c) => node.values[c])]
       : [rel.childTable, rel.fk.columns, rel.fk.refColumns.map((c) => node.values[c])];
-  if (wanted.some((v) => v == null)) return 0;
+  if (wanted.some((v) => v == null)) return { present: 0, linked: 0 };
 
-  let n = 0;
+  const fkLabel = `${rel.childTable}.${rel.fk.columns.join('+')}`;
+  let present = 0;
+  let linked = 0;
   for (const other of state.nodes.values()) {
     if (other.table !== table) continue;
-    if (theirCols.every((c, i) => sameKeyValue(other.values[c], wanted[i]))) n++;
+    if (!theirCols.every((c, i) => sameKeyValue(other.values[c], wanted[i]))) continue;
+    present++;
+    // The FK always points child -> parent, whichever end we're inspecting from.
+    const edgeId =
+      rel.kind === 'forward'
+        ? edgeIdFor(node.id, fkLabel, other.id)
+        : edgeIdFor(other.id, fkLabel, node.id);
+    if (state.edges.has(edgeId)) linked++;
   }
-  return n;
+  return { present, linked };
 }
 
 /** Child-column -> value map for a reverse expansion, or null if any value is NULL. */

@@ -10,6 +10,8 @@ export interface RelEntry {
   count: number | null;
   /** How many of those rows are already nodes on the canvas. */
   present: number;
+  /** How many of those are already joined to this node by the edge. */
+  linked: number;
 }
 
 interface Props {
@@ -31,8 +33,13 @@ function fmt(v: SqlValue): string {
 export function Inspector({ node, entries, colorFor, onExpandRel, onExpandDirection, onClose }: Props) {
   const forward = entries.filter((e) => e.rel.kind === 'forward');
   const reverse = entries.filter((e) => e.rel.kind === 'reverse');
-  // A direction is expandable while any of its relationships has rows left to pull in.
-  const canExpand = (group: RelEntry[]) => group.some((e) => !e.expanded && e.count !== 0);
+  // A direction is expandable while any of its relationships would still change
+  // the canvas — either new rows, or an edge that isn't drawn yet.
+  const canExpand = (group: RelEntry[]) =>
+    group.some((e) => {
+      if (e.expanded || e.count === 0 || e.count === null) return false;
+      return !(e.present >= e.count && e.linked >= e.present);
+    });
   return (
     <div className="panel inspector">
       <div className="panel-title">
@@ -45,10 +52,15 @@ export function Inspector({ node, entries, colorFor, onExpandRel, onExpandDirect
 
       <div className="section-label">Relationships</div>
       <div className="rel-list">
-        {entries.map(({ rel, key, expanded, count, present }) => {
-          // Every row on the other side is already on the canvas, so this adds
-          // edges only — say "connect" rather than promising new rows.
-          const edgesOnly = count !== null && count > 0 && present >= count;
+        {entries.map(({ rel, key, expanded, count, present, linked }) => {
+          // Three outcomes, and the button should name the right one:
+          //   some rows still to fetch      -> "expand"  (nodes will appear)
+          //   all present, not all joined   -> "connect" (only edges appear)
+          //   all present and all joined    -> nothing would change at all
+          const allPresent = count !== null && count > 0 && present >= count;
+          const nothingToAdd = allPresent && linked >= present;
+          const edgesOnly = allPresent && !nothingToAdd;
+          const done = expanded || nothingToAdd;
           return (
           <div key={key} className="rel-item">
             <span className="rel-desc">
@@ -70,21 +82,23 @@ export function Inspector({ node, entries, colorFor, onExpandRel, onExpandDirect
               {count === null ? '…' : rel.kind === 'forward' && count === 0 ? 'null' : count}
               {count !== null && present > 0 && (
                 <span className="rel-present">
-                  {edgesOnly ? ' on canvas' : ` · ${present} on canvas`}
+                  {allPresent ? ' on canvas' : ` · ${present} on canvas`}
                 </span>
               )}
             </span>
             <button
               className="expand-button"
-              disabled={expanded || count === 0}
+              disabled={done || count === 0}
               onClick={() => onExpandRel(rel)}
               title={
-                edgesOnly
-                  ? 'Every row on the other side is already on the canvas — this just draws the edge'
-                  : undefined
+                nothingToAdd
+                  ? 'These rows and their edges are already on the canvas — nothing left to add'
+                  : edgesOnly
+                    ? 'Every row on the other side is already on the canvas — this just draws the edge'
+                    : undefined
               }
             >
-              {expanded ? '✓' : edgesOnly ? 'connect' : 'expand'}
+              {done ? '✓' : edgesOnly ? 'connect' : 'expand'}
             </button>
           </div>
           );

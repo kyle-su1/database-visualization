@@ -7,7 +7,6 @@ import { relationshipsFor, tableByName, type Relationship } from '../schema/rela
 import { detectJunctionTables, effectiveJunctions } from '../schema/junctions';
 import {
   addSeed,
-  alreadyPresent,
   completeJunctionNodes,
   countRelationship,
   emptyGraph,
@@ -19,6 +18,7 @@ import {
   isRelExpanded,
   makeNode,
   relKey,
+  relationshipPresence,
   type ExpandResult,
   type GraphState,
   type PillNode,
@@ -370,7 +370,7 @@ export function App() {
               : counts.forNode === selectedNode.id
                 ? (counts.byRel[relKey(rel)] ?? null)
                 : null,
-          present: alreadyPresent(graph, selectedNode, rel),
+          ...relationshipPresence(graph, selectedNode, rel),
         }))
       : [];
 
