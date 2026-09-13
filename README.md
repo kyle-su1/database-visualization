@@ -54,6 +54,8 @@ and the SQL-log panel shows the real queries each expansion runs.
 | `npm run test:backend` | backend tests (PGlite + node:test) |
 | `npm run typecheck:backend` | backend typecheck |
 | `npm run benchmark:batch` | compare row-by-row and batched Postgres key lookups |
+| `npm run benchmark:graph` | measure browser-to-SVG graph expansion latency |
+| `npm run typecheck:benchmarks` | benchmark harness typecheck |
 
 ## Batch benchmark
 
@@ -83,6 +85,42 @@ measured runs after three warmups:
 The app's default many-to-many expansion fetches 25 junction partners. Its SQL
 cost is now three statements—count, junction page, and batched partner lookup—
 instead of 27 statements with individual partner lookups.
+
+## End-to-end graph benchmark
+
+The graph benchmark builds the production frontend, creates an isolated
+five-table PostgreSQL schema, starts Fastify and the Vite preview server on
+random local ports, and drives the real UI in headless Chromium. Each run grows
+the graph through four deterministic stages and validates every resulting node
+and edge before the sample is accepted. The schema and servers are removed when
+the run finishes.
+
+```bash
+npx playwright install chromium  # once per machine
+DATABASE_URL=postgres://... npm run benchmark:graph
+```
+
+Latency begins at the DOM click and ends two animation frames after the SVG
+commit. It includes the browser, HTTP API, SQL queries, graph-state update, and
+React render; it does not wait for the force simulation to settle. Staggered
+node reveal is disabled. The benchmark also samples animation frames and
+reports the p95 of the longest frame interval in each expansion. Use
+`GRAPH_BENCH_RUNS` and `GRAPH_BENCH_WARMUPS` to change the default 20 measured
+runs and two warmups.
+
+Reference run on 2026-09-13 using the production build, Chromium 153,
+PostgreSQL 18.4, and an Apple M4:
+
+| Graph growth | Nodes added | Total edges | SQL queries | p50 | p95 | p95 max frame gap |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 → 25 nodes | 24 | 24 | 2 | 30.4 ms | 31.0 ms | 16.7 ms |
+| 25 → 97 nodes | 72 | 96 | 48 | 66.0 ms | 66.8 ms | 16.8 ms |
+| 97 → 457 nodes | 360 | 456 | 144 | 151.3 ms | 167.7 ms | 16.8 ms |
+| 457 → 1,177 nodes | 720 | 1,176 | 720 | 874.1 ms | 909.4 ms | 16.8 ms |
+
+This is a baseline rather than an optimized claim. The query counts show that
+large incoming expansions are currently bounded by row-by-row reverse
+relationship requests, giving the next optimization a reproducible target.
 
 ## Design notes
 

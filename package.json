@@ -12,9 +12,21 @@
     "typecheck:backend": "npm run typecheck --workspace @dbviz/backend",
     "test:backend": "npm run test --workspace @dbviz/backend",
     "benchmark:batch": "npm run benchmark:batch --workspace @dbviz/backend",
+    "benchmark:graph": "node benchmarks/graph.bench.ts",
+    "typecheck:benchmarks": "tsc --noEmit -p benchmarks/tsconfig.json",
     "build": "npm run build --workspace @dbviz/frontend",
     "preview": "npm run preview --workspace @dbviz/frontend",
     "lint": "npm run lint --workspace @dbviz/frontend",
     "test": "npm run test --workspace @dbviz/frontend"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/pg": "^8.23.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "dotenv": "^16.6.1",
+    "pg": "^8.23.0",
+    "playwright": "^1.63.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3"
   }
 }
