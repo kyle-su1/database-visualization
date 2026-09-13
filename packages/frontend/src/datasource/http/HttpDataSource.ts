@@ -17,8 +17,8 @@ export interface HttpOptions {
 
 /**
  * DataSource backed by the Fastify server's read endpoints — the server-backed
- * twin of SqlJsDataSource. Each method is one GET whose response carries the
- * SQL the server ran; those entries accumulate here so the query-log panel
+ * twin of SqlJsDataSource. Each request carries back the SQL the server ran;
+ * those entries accumulate here so the query-log panel
  * works identically to the in-browser source. Nothing above the DataSource
  * boundary knows which implementation it's talking to.
  */
@@ -44,6 +44,15 @@ export class HttpDataSource implements DataSource {
     );
     this.record(queryLog);
     return row;
+  }
+
+  async getRowsByKeys(table: string, keys: PkValue[]): Promise<(Row | null)[]> {
+    const { rows, queryLog } = await this.post<{
+      rows: (Row | null)[];
+      queryLog: QueryLogEntry[];
+    }>('/rows/batch', { table, keys });
+    this.record(queryLog);
+    return rows;
   }
 
   async getRows(
@@ -101,6 +110,16 @@ export class HttpDataSource implements DataSource {
     }
     const query = qs.toString();
     const res = await this.fetchFn(`${this.baseUrl}${path}${query ? `?${query}` : ''}`);
+    if (!res.ok) throw new Error(await errorMessage(res));
+    return (await res.json()) as T;
+  }
+
+  private async post<T>(path: string, body: unknown): Promise<T> {
+    const res = await this.fetchFn(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
     if (!res.ok) throw new Error(await errorMessage(res));
     return (await res.json()) as T;
   }

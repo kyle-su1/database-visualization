@@ -438,9 +438,13 @@ function applyForward(
   fk: FkSchema,
   childTable: string,
   row: Row,
+  batchGroup?: string[],
 ): void {
   const parent = makeNode(tableByName(schema, fk.refTable), row);
-  if (addNode(d, parent)) d.groups.push([parent.id]); // one query, one node
+  if (addNode(d, parent)) {
+    if (batchGroup) batchGroup.push(parent.id);
+    else d.groups.push([parent.id]);
+  }
   addEdge(d, node.id, `${childTable}.${fk.columns.join('+')}`, parent.id);
 }
 
@@ -474,14 +478,46 @@ async function traverseJunctionRows(
       if (key) pending.push({ rowNode, fk, key });
     }
   }
-  const rows = await mapLimit(pending, FETCH_CONCURRENCY, (p) => ds.getRow(p.fk.refTable, p.key));
-  // Apply in request order, so nodes and edges land deterministically
-  // regardless of the order responses came back in.
-  rows.forEach((row, i) => {
-    if (!row) return; // dangling FK
-    const p = pending[i];
-    applyForward(d, schema, p.rowNode, p.fk, junctionT.name, row);
+  // A user override can mark a table with more than two FKs as a junction, so
+  // group compatible lookups by target table and key-column shape. Each group
+  // becomes one DataSource request and one SQL statement on Postgres.
+  const batches = new Map<string, { indices: number[]; table: string; keys: PkValue[] }>();
+  pending.forEach((p, index) => {
+    const batchKey = `${p.fk.refTable}|${Object.keys(p.key).join('|')}`;
+    let batch = batches.get(batchKey);
+    if (!batch) {
+      batch = { indices: [], table: p.fk.refTable, keys: [] };
+      batches.set(batchKey, batch);
+    }
+    batch.indices.push(index);
+    batch.keys.push(p.key);
   });
+
+  const rows = new Array<Row | null>(pending.length).fill(null);
+  await mapLimit([...batches.values()], FETCH_CONCURRENCY, async (batch) => {
+    const fetched = await ds.getRowsByKeys(batch.table, batch.keys);
+    fetched.forEach((row, index) => {
+      rows[batch.indices[index]] = row;
+    });
+  });
+
+  // Apply in request order so graph identity and edge insertion remain
+  // deterministic. New nodes from one batched query reveal together.
+  const groupIdsByBatch = new Map<string, string[]>();
+  rows.forEach((row, index) => {
+    if (!row) return; // dangling FK
+    const p = pending[index];
+    const batchKey = `${p.fk.refTable}|${Object.keys(p.key).join('|')}`;
+    let groupIds = groupIdsByBatch.get(batchKey);
+    if (!groupIds) {
+      groupIds = [];
+      groupIdsByBatch.set(batchKey, groupIds);
+    }
+    applyForward(d, schema, p.rowNode, p.fk, junctionT.name, row, groupIds);
+  });
+  for (const groupIds of groupIdsByBatch.values()) {
+    if (groupIds.length > 0) d.groups.push(groupIds);
+  }
 }
 
 /** Run `fn` over `items` with bounded concurrency, preserving result order. */

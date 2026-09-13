@@ -53,6 +53,30 @@ describe('HttpDataSource', () => {
     expect(urls[0]).toBe(`/api/row?table=album&pk=${encodeURIComponent('{"album_id":3}')}`);
   });
 
+  it('getRowsByKeys posts one ordered batch and accumulates its query log', async () => {
+    const requests: { input: string; init?: RequestInit }[] = [];
+    const fetchFn = async (input: string, init?: RequestInit): Promise<Response> => {
+      requests.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          rows: [{ pk: { artist_id: 2 }, values: { name: 'Aerosmith' } }, null],
+          queryLog: log('SELECT batch'),
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const ds = new HttpDataSource({ fetch: fetchFn });
+    const rows = await ds.getRowsByKeys('artist', [{ artist_id: 2 }, { artist_id: 999 }]);
+    expect(rows.map((row) => row?.values.name ?? null)).toEqual(['Aerosmith', null]);
+    expect(requests[0].input).toBe('/api/rows/batch');
+    expect(requests[0].init?.method).toBe('POST');
+    expect(JSON.parse(String(requests[0].init?.body))).toEqual({
+      table: 'artist',
+      keys: [{ artist_id: 2 }, { artist_id: 999 }],
+    });
+    expect(ds.getQueryLog()).toHaveLength(1);
+  });
+
   it('getReferencingRows passes JSON refValues, keeps limit 0, returns rows + total', async () => {
     const { urls, fetchFn } = stubFetch({
       '/api/referencing': { rows: [], totalCount: 42, queryLog: log('SELECT COUNT(*) …') },

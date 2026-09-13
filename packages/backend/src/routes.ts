@@ -8,7 +8,7 @@ import type { PgDataSource } from './data.ts';
 export type GetData = () => Promise<PgDataSource | null>;
 
 /**
- * The four read endpoints, mirroring the DataSource interface 1:1 — the API
+ * The read endpoints mirror the DataSource interface 1:1 — the API
  * IS the contract. Fastify validates and type-coerces every querystring param
  * against the JSON schemas below BEFORE the handler runs, so `limit` arrives as
  * a bounded integer and required params are guaranteed present; the handler
@@ -71,6 +71,31 @@ export function registerDataRoutes(app: FastifyInstance, getData: GetData): void
     async (req) => {
       const { table, pk } = req.query as { table: string; pk: string };
       return (await need()).getRow(table, parseJsonObject(pk, 'pk'));
+    },
+  );
+
+  app.post(
+    '/api/rows/batch',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['table', 'keys'],
+          additionalProperties: false,
+          properties: {
+            table: { type: 'string', minLength: 1 },
+            keys: {
+              type: 'array',
+              maxItems: config.rowLimit,
+              items: { type: 'object', minProperties: 1 },
+            },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const { table, keys } = req.body as { table: string; keys: PkValue[] };
+      return (await need()).getRowsByKeys(table, keys);
     },
   );
 

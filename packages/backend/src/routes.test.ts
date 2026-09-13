@@ -72,6 +72,24 @@ test('GET /api/row parses the JSON pk param', async () => {
   assert.equal(res.json().row.values.title, 'Big Ones');
 });
 
+test('POST /api/rows/batch returns ordered hits and misses from one query', async () => {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/rows/batch',
+    payload: {
+      table: 'artist',
+      keys: [{ artist_id: 2 }, { artist_id: 999 }, { artist_id: 1 }],
+    },
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.deepEqual(
+    body.rows.map((row: { values: { name: string } } | null) => row?.values.name ?? null),
+    ['Aerosmith', null, 'AC/DC'],
+  );
+  assert.equal(body.queryLog.length, 1);
+});
+
 test('malformed JSON in a pk param is a 400', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/row?table=album&pk=not-json' });
   assert.equal(res.statusCode, 400);

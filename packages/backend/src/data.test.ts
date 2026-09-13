@@ -61,6 +61,27 @@ test('getRow returns a single row or null', async () => {
   assert.equal(miss.row, null);
 });
 
+test('getRowsByKeys preserves key order and resolves misses in one query', async () => {
+  const { rows, queryLog } = await data.getRowsByKeys('artist', [
+    { artist_id: 3 },
+    { artist_id: 999 },
+    { artist_id: 1 },
+  ]);
+  assert.deepEqual(
+    rows.map((row) => row?.values.name ?? null),
+    ['Audioslave', null, 'AC/DC'],
+  );
+  assert.equal(queryLog.length, 1);
+  assert.match(queryLog[0].sql, / OR /);
+});
+
+test('getRowsByKeys rejects mixed key shapes', async () => {
+  await assert.rejects(
+    () => data.getRowsByKeys('artist', [{ artist_id: 1 }, { name: 'Aerosmith' }]),
+    { statusCode: 400 },
+  );
+});
+
 test('getReferencingRows with limit 0 is count-only (one query, no rows)', async () => {
   const { rows, totalCount, queryLog } = await data.getReferencingRows(
     'album',

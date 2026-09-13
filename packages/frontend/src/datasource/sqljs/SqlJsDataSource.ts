@@ -122,6 +122,27 @@ export class SqlJsDataSource implements DataSource {
     return rows.length > 0 ? this.toRow(t, rows[0]) : null;
   }
 
+  async getRowsByKeys(table: string, keys: PkValue[]): Promise<(Row | null)[]> {
+    const t = this.assertTable(table);
+    if (keys.length === 0) return [];
+    const cols = this.assertKeyShape(t, keys);
+    const params: SqlValue[] = [];
+    const where = keys
+      .map((key) => {
+        params.push(...cols.map((c) => key[c]));
+        return `(${cols.map((c) => `${q(c)} = ?`).join(' AND ')})`;
+      })
+      .join(' OR ');
+    const rows = this.run(
+      `SELECT ${this.selectList(t)} FROM ${q(t.name)} WHERE ${where}`,
+      params,
+    );
+    return keys.map((key) => {
+      const values = rows.find((row) => cols.every((c) => sqlValuesEqual(row[c], key[c])));
+      return values ? this.toRow(t, values) : null;
+    });
+  }
+
   async getRows(
     table: string,
     opts: { limit: number; offset?: number; searchText?: string },
@@ -194,6 +215,19 @@ export class SqlJsDataSource implements DataSource {
     return c.name;
   }
 
+  private assertKeyShape(t: TableSchema, keys: PkValue[]): string[] {
+    const names = Object.keys(keys[0]);
+    if (names.length === 0) throw new Error('A lookup key must contain at least one column');
+    const cols = names.map((name) => this.assertColumn(t, name));
+    for (const key of keys) {
+      const keyNames = Object.keys(key);
+      if (keyNames.length !== cols.length || cols.some((c) => !(c in key))) {
+        throw new Error('Every lookup key in a batch must use the same columns');
+      }
+    }
+    return cols;
+  }
+
   /** Include rowid explicitly when it serves as the fallback PK. */
   private selectList(t: TableSchema): string {
     return t.pk[0] === ROWID && !t.columns.some((c) => c.name === ROWID)
@@ -224,4 +258,11 @@ export class SqlJsDataSource implements DataSource {
 
 function isTexty(type: string): boolean {
   return type === '' || /char|text|clob/i.test(type);
+}
+
+function sqlValuesEqual(a: SqlValue | undefined, b: SqlValue | undefined): boolean {
+  if (a instanceof Uint8Array && b instanceof Uint8Array) {
+    return a.length === b.length && a.every((value, index) => value === b[index]);
+  }
+  return a === b;
 }

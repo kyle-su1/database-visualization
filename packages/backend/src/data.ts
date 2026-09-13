@@ -102,6 +102,44 @@ export class PgDataSource {
     return { row: rows.length > 0 ? this.toRow(t, rows[0]) : null, queryLog: log };
   }
 
+  async getRowsByKeys(
+    table: string,
+    keys: PkValue[],
+  ): Promise<{ rows: (Row | null)[]; queryLog: QueryLogEntry[] }> {
+    const log: QueryLogEntry[] = [];
+    const t = this.assertTable(table);
+    if (keys.length === 0) return { rows: [], queryLog: log };
+    if (keys.length > this.rowLimit) {
+      throw httpError(400, `Too many keys: maximum batch size is ${this.rowLimit}`);
+    }
+
+    const cols = this.assertKeyShape(t, keys);
+    const params: SqlValue[] = [];
+    const where = keys
+      .map((key) => {
+        const clause = cols
+          .map((c) => {
+            params.push(key[c]);
+            return this.eq(c, params.length);
+          })
+          .join(' AND ');
+        return `(${clause})`;
+      })
+      .join(' OR ');
+    const fetched = await this.run(
+      `SELECT ${this.selectList(t)} FROM ${q(t.name)} WHERE ${where}`,
+      params,
+      log,
+    );
+    const rows = fetched.map((values) => this.toRow(t, values));
+    return {
+      rows: keys.map(
+        (key) => rows.find((row) => cols.every((c) => sqlValuesEqual(row.values[c], key[c]))) ?? null,
+      ),
+      queryLog: log,
+    };
+  }
+
   async getReferencingRows(
     childTable: string,
     fkId: number,
@@ -164,6 +202,19 @@ export class PgDataSource {
     return c.name;
   }
 
+  private assertKeyShape(t: TableSchema, keys: PkValue[]): string[] {
+    const names = Object.keys(keys[0]);
+    if (names.length === 0) throw httpError(400, 'A lookup key must contain at least one column');
+    const cols = names.map((name) => this.assertColumn(t, name));
+    for (const key of keys) {
+      const keyNames = Object.keys(key);
+      if (keyNames.length !== cols.length || cols.some((c) => !(c in key))) {
+        throw httpError(400, 'Every lookup key in a batch must use the same columns');
+      }
+    }
+    return cols;
+  }
+
   /** Include ctid explicitly when it stands in as the PK (it is not part of *). */
   private selectList(t: TableSchema): string {
     return t.pk[0] === CTID && !t.columns.some((c) => c.name === CTID) ? 'ctid, *' : '*';
@@ -188,4 +239,13 @@ export class PgDataSource {
     log.push({ sql, params, ms: performance.now() - t0 });
     return res.rows;
   }
+}
+
+function sqlValuesEqual(a: unknown, b: unknown): boolean {
+  const comparable = (value: unknown): string => {
+    if (value instanceof Date) return value.toISOString();
+    if (value instanceof Uint8Array) return Array.from(value).join(',');
+    return String(value);
+  };
+  return comparable(a) === comparable(b);
 }

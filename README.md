@@ -53,6 +53,36 @@ and the SQL-log panel shows the real queries each expansion runs.
 | `npm run dev:backend` | backend dev server (Node native TS, no transpiler) |
 | `npm run test:backend` | backend tests (PGlite + node:test) |
 | `npm run typecheck:backend` | backend typecheck |
+| `npm run benchmark:batch` | compare row-by-row and batched Postgres key lookups |
+
+## Batch benchmark
+
+The backend benchmark creates a uniquely named 500-row table in the configured
+PostgreSQL database, compares the old eight-way-concurrent lookup path with one
+batched SQL query, validates that both return identical ordered results, and
+drops the table when it finishes.
+
+```bash
+DATABASE_URL=postgres://... npm run benchmark:batch
+```
+
+It reports query counts plus median and p95 latency for 25, 100, and 500 keys.
+Use `BENCH_RUNS`, `BENCH_WARMUPS`, or a comma-separated `BENCH_SIZES` to change
+the workload. Record the PostgreSQL version and CPU printed by the script when
+using results outside the repository.
+
+Reference run on 2026-09-13 using PostgreSQL 18.4 on an Apple M4, with 20
+measured runs after three warmups:
+
+| Keys | Row-by-row queries | Batch queries | Row-by-row p95 | Batch p95 | Speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 25 | 1 | 1.38 ms | 0.34 ms | 4.10x |
+| 100 | 100 | 1 | 3.97 ms | 0.49 ms | 8.09x |
+| 500 | 500 | 1 | 20.58 ms | 3.59 ms | 5.73x |
+
+The app's default many-to-many expansion fetches 25 junction partners. Its SQL
+cost is now three statements—count, junction page, and batched partner lookup—
+instead of 27 statements with individual partner lookups.
 
 ## Design notes
 

@@ -11,6 +11,7 @@
     "dev:backend": "npm run dev --workspace @dbviz/backend",
     "typecheck:backend": "npm run typecheck --workspace @dbviz/backend",
     "test:backend": "npm run test --workspace @dbviz/backend",
+    "benchmark:batch": "npm run benchmark:batch --workspace @dbviz/backend",
     "build": "npm run build --workspace @dbviz/frontend",
     "preview": "npm run preview --workspace @dbviz/frontend",
     "lint": "npm run lint --workspace @dbviz/frontend",

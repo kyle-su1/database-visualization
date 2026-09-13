@@ -67,6 +67,12 @@ export interface DataSource {
   /** Fetch a single row by primary key (or unique column match). */
   getRow(table: string, pk: PkValue): Promise<Row | null>;
 
+  /**
+   * Fetch several rows by primary key (or the same unique-column shape) in one
+   * underlying query. Results preserve key order and contain null for misses.
+   */
+  getRowsByKeys(table: string, keys: PkValue[]): Promise<(Row | null)[]>;
+
   /** Browse/search rows of a table (seed selection). */
   getRows(
     table: string,

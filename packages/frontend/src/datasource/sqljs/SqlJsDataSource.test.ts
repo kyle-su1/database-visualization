@@ -72,6 +72,21 @@ describe('row access', () => {
     expect(await ds.getRow('Artist', { ArtistId: -1 })).toBeNull();
   });
 
+  it('getRowsByKeys preserves order and batches the lookup into one query', async () => {
+    const before = ds.getQueryLog().length;
+    const rows = await ds.getRowsByKeys('Artist', [
+      { ArtistId: 3 },
+      { ArtistId: -1 },
+      { ArtistId: 1 },
+    ]);
+    expect(rows.map((row) => row?.values.Name ?? null)).toEqual([
+      'Aerosmith',
+      null,
+      'AC/DC',
+    ]);
+    expect(ds.getQueryLog().length - before).toBe(1);
+  });
+
   it('getRows supports search', async () => {
     const rows = await ds.getRows('Artist', { limit: 10, searchText: 'AC/DC' });
     expect(rows.some((r) => r.values.Name === 'AC/DC')).toBe(true);
@@ -221,8 +236,12 @@ describe('expandNode (graph session over the DataSource interface)', () => {
       (r) => r.kind === 'reverse' && r.childTable === 'PlaylistTrack',
     )!;
 
+    const logStart = ds.getQueryLog().length;
     const r = await expandRelationship(ds, schema, state, node, rel, { junctions });
     state = r.state;
+
+    // count + page for PlaylistTrack, then one batched Track lookup.
+    expect(ds.getQueryLog().length - logStart).toBe(3);
 
     // Each junction row pulled in its Track partner automatically.
     const tracks = [...state.nodes.values()].filter((n) => n.table === 'Track');
