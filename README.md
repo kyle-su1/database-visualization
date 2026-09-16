@@ -1,4 +1,5 @@
 # database-visualization
+<img width="2970" height="1542" alt="image" src="https://github.com/user-attachments/assets/5c8a1623-823e-4cc1-9cb1-7b73070805df" />
 
 A schema-adaptive relational data explorer. Load any database and it renders
 **rows as nodes and foreign keys as edges**; you seed a row and expand outward
